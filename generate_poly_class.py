@@ -39,7 +39,7 @@ def generate_dataset(
     cp = p2g.CharPolyClass(polys[class_idx], k, z, E, params)
     os.makedirs(save_dir, exist_ok=True)
 
-    batcher = Parallel()
+    batcher = Parallel(n_jobs=-1, prefer='threads')
     for i, (v1, v2) in enumerate(zip(p1_parts, p2_parts)):
         print(f"[Class {class_idx}] Partition {i} - computing...")
         t0 = time.perf_counter()
@@ -80,6 +80,7 @@ def generate_dataset(
     np.savez_compressed(
         out,
         graphs_pickle=np.array(all_pickles, dtype=object),
+        y=class_idx,
         a_vals=param1_vals,
         b_vals=param2_vals,
         **metas[class_idx],
