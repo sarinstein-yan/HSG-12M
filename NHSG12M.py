@@ -231,9 +231,8 @@ class NHSG12M:
 
         return all_exprs, all_metas
 
-
+    @staticmethod
     def generate_dataset(
-        self,
         class_idx: int,
         class_data: str = "./ParamTable.npz",
         save_dir: str = "./poly_class_dataset",
@@ -309,6 +308,7 @@ class NHSG12M:
             b_vals=param2_vals,
             **metas[class_idx],
         )
+        print(f"[Class {class_idx}] Combined dataset saved → {out}")
 
     @staticmethod
     def filter_metas(
@@ -394,7 +394,7 @@ class NHSG12M:
                 selected_count = mask.sum()   # or len(av[mask])
                 combined_metas.extend([cls_meta] * selected_count)
 
-        # Construct output filename based on filters
+        # Construct output file_name based on filters
         fname = 'classes_combined'
         if a_vals_filter is not None:
             fname += '_a_' + '_'.join(map(str, a_vals_filter))
@@ -415,7 +415,8 @@ class NHSG12M:
 
     def generate_ParamTable(
         self,
-        file: str,
+        save_dir: str,
+        file_name: str,
         exprs: List[str],
         metas: List[Dict],
         real_coeff_walk,
@@ -429,8 +430,10 @@ class NHSG12M:
 
         Parameters
         ----------
-        file : str
-            Output filename (NPZ format).
+        save_dir : str
+            Directory to save the parameter table.
+        file_name : str
+            Name of the output file. NPZ format.
         exprs : List[str]
             Polynomial expressions to include.
         metas : List[Dict]
@@ -453,8 +456,11 @@ class NHSG12M:
         param_vals_pair = np.asarray([p1.ravel(), p2.ravel()])
 
         # Save expressions, metadata, and parameter grid
+        os.makedirs(save_dir, exist_ok=True)
+        if not file_name.endswith('.npz'):
+            file_name += '.npz'
         np.savez(
-            file,
+            os.path.join(save_dir, file_name),
             polys=np.array(exprs, dtype=object),
             metas=np.array(metas, dtype=object),
             param_vals=param_vals_pair,
