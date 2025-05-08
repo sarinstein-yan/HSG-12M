@@ -304,6 +304,7 @@ class NHSG12M:
         np.savez_compressed(
             out,
             graphs_pickle=np.array(all_pickles, dtype=object),
+            y=class_idx,
             a_vals=param1_vals,
             b_vals=param2_vals,
             **metas[class_idx],
@@ -413,8 +414,8 @@ class NHSG12M:
         )
         return out_path
 
+    @staticmethod
     def generate_ParamTable(
-        self,
         save_dir: str,
         file_name: str,
         exprs: List[str],
