@@ -339,6 +339,7 @@ class NHSG12M:
                 matched.append(i)
         return matched
 
+    # TODO: no "parts" anymore
     def combine_class_parts(
         self,
         metas: List[Dict],
@@ -420,8 +421,8 @@ class NHSG12M:
         file_name: str,
         exprs: List[str],
         metas: List[Dict],
-        real_coeff_walk,
-        imag_coeff_walk,
+        real_coeff_walk: List[float],
+        imag_coeff_walk: List[complex],
     ) -> None:
         """
         Generate and save a parameter table with all combinations of real and imaginary parts.
