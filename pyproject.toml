@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hsg"
+dynamic = ["version"]
+description = "HSG-12M: A Large-Scale Spatial Multigraph Dataset"
+authors = [
+    {name = "Xianquan (Sarinstein) Yan", email = "xianquanyan@gmail.com"},
+    {name = "Hakan Akgün", email = "hakanakgun317@gmail.com"},
+]
+maintainers  = [
+    {name = "Xianquan (Sarinstein) Yan", email = "xianquanyan@gmail.com"},
+]
+keywords = [
+    "non-hermitian spectral graph", "non-bloch band", "algebraic geometry", 
+    "graph representation learning", "transformer", "computer vision", 
+    "morphological image processing"
+]
+readme = {"file" = "README.md", "content-type" = "text/markdown"}
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Environment :: GPU :: NVIDIA CUDA"
+]
+dependencies = [
+    "poly2graph",
+    "lightning",
+    "torch_geometric",
+]
+
+[project.optional-dependencies]
+require = ["tensorflow"]  # packages to install manually
+
+[project.urls]
+Homepage = "https://github.com/sarinstein-yan/HSG-12M"
+Repository = "https://github.com/sarinstein-yan/HSG-12M"
+
+[tool.hatch.version]
+path = "src/hsg/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["assets"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hsg"]
