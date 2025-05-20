@@ -1,3 +1,5 @@
+'''Adapted from PyTorch Geometric'''
+
 import copy
 import inspect
 from typing import Any, Callable, Dict, Final, List, Optional, Tuple, Union

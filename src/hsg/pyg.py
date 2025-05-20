@@ -1,34 +1,90 @@
-import pickle
+from __future__ import annotations
+
+"""PyG **On‑disk** dataset wrapper for the 12‑million‑graph *HSG* corpus.
+
+Highlights
+==========
+* **Subset‑aware** – choose ``one‑band``, ``two‑band``, ``three‑band``, ``all`` or
+  ``topology`` and only the relevant raw files are downloaded and processed.
+* **Lazy metadata bootstrap** – on first construction we fetch the two tiny
+  metadata assets (*ParamTable.npz* + *HSG‑topology‑mask.pkl*) **before** PyG
+  inspects :pyattr:`raw_file_names`.  This lets us discover which of the
+  ``class_XXX.npz`` blobs are actually required.
+* **Dynamic `raw_file_names`** – the property now lists *only* the files needed
+  for the chosen subset so PyG never complains about missing placeholders.
+* **Subset‑scoped root folder** – each subset lives in its own sub‑directory
+  (``<root>/<subset>/``) so you can keep multiple variants side‑by‑side without
+  collisions.
+
+Usage
+-----
+```python
+from hsg_dataset import HSGOnDisk
+
+dset = HSGOnDisk("~/data/HSG", subset="two-band", n_jobs=8)
+print(len(dset), "graphs", dset.num_classes, "classes")
+```
+"""
+
+import shutil
+import time
 from pathlib import Path
-from typing import List, Optional, Sequence, Dict
+from typing import Dict, List, Optional, Sequence, Set
 
 import networkx as nx
 import numpy as np
+import pickle
+import requests
+from urllib.request import urlretrieve
 import torch
 from joblib import Parallel, delayed
+from tqdm import tqdm
 from torch_geometric.data import OnDiskDataset, InMemoryDataset
 
+# ---------------------------------------------------------------------------
+# Helper utilities (stand‑alone – no torch_geometric imports here)
+# ---------------------------------------------------------------------------
 
+def _download_url(url: str, dst: Path, *, desc: str = "", overwrite: bool = False) -> None:
+    """Stream *url* → *dst* with a tqdm progress‑bar."""
+    if dst.exists() and not overwrite:
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with requests.get(url, stream=True, timeout=60) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("content-length", 0))
+        with tqdm.wrapattr(r.raw, "read", total=total, desc=desc or dst.name) as raw:
+            with open(dst, "wb") as f:
+                shutil.copyfileobj(raw, f)
+
+
+def _dataverse_file_map() -> Dict[str, int]:
+    """Return *filename → file‑ID* mapping for the Harvard Dataverse record."""
+    api = (
+        "https://dataverse.harvard.edu/api/datasets/:persistentId"
+        "?persistentId=doi:10.7910/DVN/PYDSSQ"
+    )
+    js = requests.get(api, timeout=30).json()
+    files = js["data"]["latestVersion"]["files"]
+    return {f["dataFile"]["filename"]: f["dataFile"]["id"] for f in files}
+
+
+# ---------------------------------------------------------------------------
+# Main dataset class
+# ---------------------------------------------------------------------------
 class HSGOnDisk(OnDiskDataset):
-    """HSG dataset stored in an on‑disk database with *dense* labels.
+    """On‑disk PyG wrapper around the HSG‑12M corpus (1401 classes)."""
 
-    Unlike the original implementation, the label remapping (old scattered
-    class‑IDs → dense **0‥C‑1**) is handled *here* during processing so that
-    every downstream consumer – including
-    :class:`HSGInMemory` – can just load graphs without any
-    further bookkeeping.
-    """
+    #: total count of *possible* raw class archives on Dataverse
+    TOTAL_NUM_CLASSES: int = 1401
 
-    #: Total number of *raw* class files that may be present
-    NUM_CLASSES: int = 1401
-
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------------
     # Construction helpers
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------------
     def __init__(
         self,
-        root: str,
-        subset: Optional[str] = "one-band",
+        root: str | Path,
+        subset: str | None = "one-band",
         *,
         n_jobs: int = -1,
         backend: str = "sqlite",
@@ -41,8 +97,35 @@ class HSGOnDisk(OnDiskDataset):
             self.subset = "all"
         self.n_jobs = n_jobs
 
-        # processed data live in a subset‑specific folder so we can build
-        # several variants side‑by‑side
+        # ------------------------------------------------------------------
+        # 0) make sure the two *tiny* metadata files exist locally
+        # ------------------------------------------------------------------
+        GH   = "https://raw.githubusercontent.com/sarinstein-yan/HSG-12M/main/assets"
+        meta_files = ["ParamTable.npz", "HSG-topology-mask.pkl"]
+        for fname in meta_files:
+            fpath = self._raw_root / fname
+            if not fpath.exists():
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+                print(f"[HSG] downloading {fname} …")
+                urlretrieve(f"{GH}/{fname}", fpath)
+
+        # ------------------------------------------------------------------
+        # 1) parse ParamTable → decide which class_*.npz files we need
+        # ------------------------------------------------------------------
+        param = np.load(self._raw_root / "ParamTable.npz", allow_pickle=True)
+        metas = param["metas"]
+
+        # *this* is the call you wanted – identical logic to _select_class_ids
+        self._required_cids = self._select_class_ids(metas)
+
+        # Build the raw-file list for this subset
+        self._raw_file_names_subset = [
+            "ParamTable.npz",
+            "HSG-topology-mask.pkl",
+            *[f"raw/class_{int(cid)}.npz" for cid in self._required_cids],
+        ]
+
+        # processed data live in a subset-specific folder
         processed_root = self._raw_root / f"processed_{self.subset}"
 
         super().__init__(
@@ -57,25 +140,18 @@ class HSGOnDisk(OnDiskDataset):
     # ------------------------------------------------------------------
     @property
     def raw_file_names(self) -> List[str]:  # type: ignore[override]
-        files = [
-            "ParamTable.npz",
-            "HSG-topology-mask.pkl",
-            *[f"raw/class_{i}.npz" for i in range(self.NUM_CLASSES)],
-        ]
-        return files
+        """Only the files needed for *this* subset."""
+        return self._raw_file_names_subset
 
     # processed_file_names is inherited from OnDiskDataset ("<backend>.db")
 
     # ------------------------------------------------------------------
-    # Label mapping helpers
+    # Label mapping helpers (shared across workers)
     # ------------------------------------------------------------------
-    _label_map: Dict[int, int] = {}  # class‑level cache (subset‑specific)
+    _label_map: Dict[int, int] = {}
 
     @classmethod
     def _set_label_map(cls, mapping: Dict[int, int]) -> None:
-        """Store the *dense* label map on the class so that the (parallel)
-        helpers can access it without serialising the whole instance.
-        """
         cls._label_map = mapping
 
     # ------------------------------------------------------------------
@@ -83,144 +159,160 @@ class HSGOnDisk(OnDiskDataset):
     # ------------------------------------------------------------------
     @staticmethod
     def _process_edge_pts(graph: nx.MultiGraph) -> nx.MultiGraph:
-        """Return a *new* graph with compact node / edge attributes.
-
-        • node attribute ``x``       → np.float32, shape = (4,)
-        • edge attribute ``edge_attr`` → np.float32, shape = (13,)
-        """
+        """Return a *new* graph with compact node / edge attributes."""
         g = graph.copy()
-        _PTS_IDXS = np.arange(1, 6)
+        _IDX = np.arange(1, 6)
 
         node_pos, node_pot, node_dos = {}, {}, {}
         for nid, nd in g.nodes(data=True):
-            pos = np.asarray(nd.pop("pos"), dtype=np.float32).reshape(-1)  # (2,)
+            pos = np.asarray(nd.pop("pos"), dtype=np.float32).reshape(-1)
             pot = np.float32(nd.pop("potential", 0.0))
             dos = np.float32(nd.pop("dos", 0.0))
             nd["x"] = np.array([*pos, pot, dos], dtype=np.float32)
             node_pos[nid], node_pot[nid], node_dos[nid] = pos, pot, dos
 
         for u, v, ed in g.edges(data=True):
-            weight = np.float32(ed.pop("weight"))
-            if "pts" in ed:  # common case
+            w = np.float32(ed.pop("weight"))
+            if "pts" in ed:
                 pts = ed.pop("pts")
-                idx = np.round(_PTS_IDXS * (len(pts) - 1) / 6).astype(int)
+                idx = np.round(_IDX * (len(pts) - 1) / 6).astype(int)
                 pts5 = pts[idx].astype(np.float32).reshape(-1)
                 avg_pot = np.float32(ed.pop("avg_potential", 0.5 * (node_pot[u] + node_pot[v])))
                 avg_dos = np.float32(ed.pop("avg_dos", 0.5 * (node_dos[u] + node_dos[v])))
-            else:  # fallback – straight line
-                mid_xy = 0.5 * (node_pos[u] + node_pos[v])
-                pts5 = np.tile(mid_xy, 5).astype(np.float32)
+            else:
+                mid = 0.5 * (node_pos[u] + node_pos[v])
+                pts5 = np.tile(mid, 5).astype(np.float32)
                 avg_pot = np.float32(0.5 * (node_pot[u] + node_pot[v]))
                 avg_dos = np.float32(0.5 * (node_dos[u] + node_dos[v]))
-
-            ed["edge_attr"] = np.concatenate(([weight, avg_pot, avg_dos], pts5), dtype=np.float32)
+            ed["edge_attr"] = np.concatenate(([w, avg_pot, avg_dos], pts5), dtype=np.float32)
         return g
 
     @classmethod
-    def _graph_to_data(cls, g: nx.MultiGraph, class_id: int) -> "torch_geometric.data.Data":
-        """Convert NetworkX → PyG ``Data`` with *dense* label already applied."""
-        import torch_geometric
+    def _graph_to_data(cls, g: nx.MultiGraph, class_id: int):
         from torch_geometric.utils import from_networkx
 
-        dense_label = cls._label_map[class_id]
+        dense = cls._label_map[class_id]
         g2 = cls._process_edge_pts(g)
         data = from_networkx(g2, group_node_attrs=["x"], group_edge_attrs=["edge_attr"])
-        data.y = torch.tensor([dense_label], dtype=torch.long)
+        data.y = torch.tensor([dense], dtype=torch.long)
         return data
 
     # ------------------------------------------------------------------
-    # Subset selection
+    # Subset helpers
     # ------------------------------------------------------------------
     def _select_class_ids(self, metas: np.ndarray) -> np.ndarray:
-        """Return the list of *class IDs* to process for the chosen subset."""
-        band_counts = np.array([m["number_of_bands"] for m in metas])
-
+        bands = np.array([m["number_of_bands"] for m in metas])
         match self.subset:
             case "one-band" | "none":
-                return np.where(band_counts == 1)[0]
+                return np.where(bands == 1)[0]
             case "two-band":
-                return np.where(band_counts == 2)[0]
+                return np.where(bands == 2)[0]
             case "three-band":
-                return np.where(band_counts == 3)[0]
+                return np.where(bands == 3)[0]
             case "all":
                 return np.arange(len(metas))
             case "topology":
-                return np.arange(len(metas))  # mask applied later
-        raise ValueError(f"Unknown subset '{self.subset}'.")
+                return np.arange(len(metas))  # mask later
+        raise ValueError(f"Unknown subset: {self.subset}")
 
     # ------------------------------------------------------------------
-    # Heavy lifting – executed *once* per subset when the DB is absent
+    # Heavy lifting – executed once per subset when the DB is absent
     # ------------------------------------------------------------------
     def process(self) -> None:  # type: ignore[override]
-        """Convert raw *.npz* files into a serialised on‑disk DB *with dense labels*."""
+        """Convert raw *.npz* files → on-disk DB (dense labels)."""
         from tqdm import tqdm
 
         # --------------------------------------------------------------
-        # 1) global metadata & subset filtering
+        # subset-specific metadata                            (unchanged)
         # --------------------------------------------------------------
         param = np.load(self._raw_root / "ParamTable.npz", allow_pickle=True)
         metas = param["metas"]
-        class_ids = self._select_class_ids(metas)
+
+        # we already know the class-ID list from __init__
+        class_ids = self._required_cids
 
         # dense label map *for this subset*
         label_map = {int(old): new for new, old in enumerate(sorted(map(int, class_ids)))}
         self._set_label_map(label_map)
 
-        # optional topology masks (only for the "topology" subset)
+        # optional topology masks
         topo_masks: Optional[Sequence[Sequence[int]]] = None
         if self.subset == "topology":
             topo_masks = pickle.load(open(self._raw_root / "HSG-topology-mask.pkl", "rb"))
 
-        # ensure DB exists before we start parallel inserts
+        # make sure DB exists before parallel inserts
         _ = self.db
 
-        # --------------------------------------------------------------
         threader = Parallel(n_jobs=self.n_jobs, prefer="threads")
-        processor = Parallel(n_jobs=self.n_jobs, backend="loky")
-        total_graphs = 0
+        worker = Parallel(n_jobs=self.n_jobs, backend="loky")
+        total = 0
 
-        for cid in tqdm(class_ids, desc="Processing classes"):
-            class_npz = self._raw_root / "raw" / f"class_{int(cid)}.npz"
-            arr = np.load(class_npz, allow_pickle=True)
-            pickled_graphs = arr["graphs_pickle"]
+        for cid in tqdm(self._required_cids, desc="Processing classes"):
+            arr = np.load(self._raw_dir / f"class_{cid}.npz", allow_pickle=True)
+            pickled = arr["graphs_pickle"]
+            nx_graphs = threader(delayed(pickle.loads)(buf) for buf in pickled)
 
-            # unpickle all graphs in parallel (I/O‑bound → threads)
-            nx_graphs: List[nx.MultiGraph] = threader(delayed(pickle.loads)(buf) for buf in pickled_graphs)
-
-            # optional topology filter (cheap)
-            allowed: Optional[set[int]] = None
+            allowed: Optional[Set[int]] = None
             if topo_masks is not None:
-                allowed = set(map(int, topo_masks[int(cid)]))
-
-            selected_graphs = (
+                allowed = set(map(int, topo_masks[cid]))
+            selected = (
                 g for idx, g in enumerate(nx_graphs) if allowed is None or idx in allowed
             )
 
-            # expensive NX → PyG conversion (CPU‑bound → processes)
-            data_list = processor(
-                delayed(self._graph_to_data)(g, int(cid)) for g in selected_graphs
+            data_list: List[Data] = worker(
+                delayed(self._graph_to_data)(g, cid) for g in selected
             )
-
-            # user hooks
             if self.pre_filter is not None:
                 data_list = [d for d in data_list if self.pre_filter(d)]
             if self.pre_transform is not None:
                 data_list = [self.pre_transform(d) for d in data_list]
 
-            # bulk insert → DB
             self.extend(data_list, batch_size=1024)
-            total_graphs += len(data_list)
+            total += len(data_list)
 
         if self.log:
-            print(f"[{self.__class__.__name__}] Stored {total_graphs} graphs → {self.processed_paths[0]}")
+            print(f"[{self.__class__.__name__}] Stored {total} graphs → {self.processed_paths[0]}")
 
     # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
     @property
     def num_classes(self) -> int:  # type: ignore[override]
-        """Number of *dense* classes for *this subset*."""
-        return len(self._label_map) if self._label_map else self.NUM_CLASSES
+        return len(self._label_map)
+
+    # ------------------------------------------------------------------
+    # Download logic
+    # ------------------------------------------------------------------
+    def download(self) -> None:  # type: ignore[override]
+        """Download *only* the files listed in :pyattr:`raw_file_names`."""
+        self._raw_dir.mkdir(parents=True, exist_ok=True)
+
+        # small assets are guaranteed present by _ensure_metadata(); we just have to
+        # fetch the potentially large class archives.
+        to_get = [p for p in self._raw_file_list if p.startswith("class_")]
+        if not to_get:
+            return  # nothing to do (rare)
+
+        fname2id = _dataverse_file_map()
+        for fname in tqdm(to_get, desc="Downloading .npz blobs"):
+            cid = int(fname.split("_")[1].split(".")[0])
+            dst = self._raw_dir / fname
+            if dst.exists():
+                continue
+            fid = fname2id[fname]
+            url = f"https://dataverse.harvard.edu/api/access/datafile/{fid}?format=original"
+            _download_url(url, dst, desc=fname)
+        time.sleep(0.2)  # flush dir cache on some filesystems
+
+    # ------------------------------------------------------------------
+    # Bootstrap helper (download small metadata assets *early*)
+    # ------------------------------------------------------------------
+    def _ensure_metadata(self) -> None:
+        """Fetch *ParamTable* and the topology mask into :pyattr:`_raw_dir`."""
+        self._raw_dir.mkdir(parents=True, exist_ok=True)
+        gh = "https://raw.githubusercontent.com/sarinstein-yan/HSG-12M/main/assets"
+        _download_url(f"{gh}/ParamTable.npz", self._raw_dir / "ParamTable.npz")
+        _download_url(f"{gh}/HSG-topology-mask.pkl", self._raw_dir / "HSG-topology-mask.pkl")
 
 
 # ======================================================================

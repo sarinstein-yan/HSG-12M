@@ -10,7 +10,7 @@ import itertools as it
 from joblib import Parallel, delayed
 # from multiprocessing.pool import ThreadPool
 import poly2graph as p2g
-from typing import Sequence, Tuple, Dict, List
+from typing import Sequence, Tuple, Dict, List, Any
 
 __all__ = [
     "HSG_Generator",
