@@ -2,19 +2,134 @@ import os
 import glob
 import time
 import pickle
-from functools import partial
 import numpy as np
 import sympy as sp
 import networkx as nx
 import itertools as it
+from functools import partial
 from joblib import Parallel, delayed
 # from multiprocessing.pool import ThreadPool
 import poly2graph as p2g
+from pathlib import Path
+from tqdm import tqdm
 from typing import Sequence, Tuple, Dict, List, Any
 
 __all__ = [
     "HSG_Generator",
 ]
+
+
+
+def _get_single_param_arr(
+    real_coeff_walk: List[float],
+    imag_coeff_walk: List[float],
+) -> np.ndarray:
+    # Convert walks to numpy arrays
+    assert not np.iscomplex(real_coeff_walk).any(), \
+        "[get_single_param_arr] real_coeff_walk should not be complex"
+    assert not np.iscomplex(imag_coeff_walk).any(), \
+        "[get_single_param_arr] imag_coeff_walk should not be complex"
+    real_vals = np.array(real_coeff_walk)
+    imag_vals = 1j*np.array(imag_coeff_walk)
+    # Sum real + imag parts to form complex parameter grid
+    param_arr = real_vals[:, None] + imag_vals[None, :]
+    return param_arr
+
+
+def _one_poly(
+    z: sp.Symbol,
+    E: sp.Symbol,
+    D: int, # Total hopping range, D = p+q
+    params: Tuple[sp.Symbol, ...], # Free coefficients (e.g., a, b)
+    s: int, # Number of bands
+    q: int, # Max positive z exponent in the base term
+    E_deg_list: Tuple[int, ...], # Exponents for E in additional terms
+    param_pos: Tuple[int, ...], # z exponents where params are inserted
+) -> Tuple[Tuple[int, ...], str, sp.Poly, Dict]:
+    # Compute complementary exponent range
+    p = D - q
+    z_degs = [d for d in range(-p + 1, q) if d != 0]
+
+    # Start with the base polynomial -E^s + z^q + z^{-p}
+    expr = -E**s + z**q + z**(-p)
+    param_map = dict(zip(param_pos, params))
+
+    # Add additional terms based on E_deg_list and parameter positions
+    for z_deg, E_deg in zip(z_degs, E_deg_list):
+        if E_deg > 0 and z_deg in param_map:
+            expr += param_map[z_deg] * E**E_deg * z**z_deg
+        elif E_deg > 0:
+            expr += E**E_deg * z**z_deg
+        elif z_deg in param_map:
+            expr += param_map[z_deg] * z**z_deg
+
+    # Expand, convert to Poly, and gather metadata
+    expr = sp.expand(expr)
+    poly = sp.Poly(expr, z, 1/z, E)
+
+    meta = {
+        'parameter_symbols': tuple(str(p) for p in params),
+        'generator_symbols': tuple(str(g) for g in poly.gens),
+        'latex': sp.latex(expr),
+        'sympy_repr': sp.srepr(poly),
+        'number_of_bands': s,
+        'max_left_hopping': q,
+        'max_right_hopping': p,
+        # Add construction details to metadata for clarity
+        'intermediate_z_degrees': tuple(z_degs),
+        'E_deg_assignments': E_deg_list,
+        'param_degree_placements': param_pos,
+    }
+
+    # Build de-duplication key and its reciprocal
+    flags = [1 if d in param_pos else 0 for d in z_degs]
+    key = list(zip(z_degs, E_deg_list, flags))
+    key_reciprocal = [(-d, e, f) for (d, e, f) in reversed(key)]
+    final_key = min(tuple(key), tuple(key_reciprocal))
+
+    return final_key, str(expr), poly, meta
+
+
+# --- HSG-topology helper functions --- #
+def _simple_copy_with_multiplicity(g_multi: nx.MultiGraph):
+    """Collapse a (multi)graph into a simple Graph, recording multiplicity."""
+    if not g_multi.is_multigraph():
+        return g_multi          # already simple, nothing to do
+
+    g_simple = nx.Graph() if isinstance(g_multi, nx.MultiGraph) else nx.DiGraph()
+    g_simple.add_nodes_from(g_multi.nodes(data=True))
+
+    for u, v, _k, data in g_multi.edges(keys=True, data=True):
+        if g_simple.has_edge(u, v):
+            g_simple[u][v]["m"] += 1          # bump multiplicity
+        else:
+            g_simple.add_edge(u, v, **data, m=1)
+    return g_simple
+
+def wl_hash_safe(g, iters=3):
+    """WL hash that tolerates MultiGraphs by collapsing them first."""
+    g_for_hash = _simple_copy_with_multiplicity(g)
+    return nx.weisfeiler_lehman_graph_hash(
+        g_for_hash,
+        iterations=iters,
+        edge_attr="m"  # include multiplicity in the label
+    )
+
+def unique_indices_by_hash(graphs, iters=3, n_jobs=-1):
+    hashes = Parallel(n_jobs=n_jobs, batch_size=256)(
+        delayed(wl_hash_safe)(g, iters=iters) for g in graphs
+    )
+    first_seen = {}
+    for idx, h in enumerate(hashes):
+        first_seen.setdefault(h, idx)
+    return list(first_seen.values())
+
+def get_topology_mask(class_idx, data_dir, wl_hash_iters=3):
+    path = os.path.join(data_dir, f"class_{class_idx}.npz")
+    graphs_pickle = np.load(path, allow_pickle=True)["graphs_pickle"]
+    graphs = [pickle.loads(g) for g in graphs_pickle]
+    return unique_indices_by_hash(graphs, iters=wl_hash_iters)
+
 
 class HSG_Generator:
     """
@@ -32,230 +147,98 @@ class HSG_Generator:
     For instance, coefficients might be varied from -10-5i to +10+5i, using
     a grid of real and imaginary values (e.g., 13 real and 7 imaginary steps,
     leading to (13*7)^2 = 8281 samples per class).
-
-    The class provides methods to:
-    1. Generate unique characteristic polynomial classes (`generate_char_poly_classes`).
-    2. Create a parameter table for coefficient sweeps (`generate_ParamTable`).
-    3. Generate spectral graph datasets for each class (`generate_dataset`).
-    4. Filter and select subsets of these generated datasets to create specific
-       dataset variants (e.g., HSG-one-band, HSG-12M) (`select_subset`).
-
-    Attributes
-    ----------
-    z : sp.Symbol
-        Symbol for the complex variable z (often representing exp(iK)).
-    E : sp.Symbol
-        Symbol for the energy variable E.
-    hopping_ranges : List[int]
-        List of hopping ranges (D values, where D = p+q) to generate polynomials for.
-    params : Tuple[sp.Symbol, ...]
-        Symbols used as free parameters in the polynomial construction (e.g., a, b).
-    num_bands : List[int]
-        List of number of energy bands (s values) to consider for the polynomials.
-    n_jobs : int
-        Number of parallel jobs to run for computationally intensive tasks
-        (-1 uses all available cores).
     """
-
     def __init__(
         self,
-        z: sp.Symbol,
-        E: sp.Symbol,
-        hopping_range: Sequence[int] | int,
-        params: Sequence[sp.Symbol],
-        num_bands: Sequence[int] = [1, 2, 3], # Default from LaTeX: 1 to 3 bands
+        root: str = './',
+        z: sp.Symbol = sp.Symbol('z'),
+        E: sp.Symbol = sp.Symbol('E'),
+        params: Sequence[sp.Symbol] = (sp.Symbol('a'), sp.Symbol('b')),
+        hopping_range: Sequence[int] | int = [4, 5, 6],
+        num_bands: Sequence[int] = [1, 2, 3],
+        real_coeff_walk: Sequence[float] = np.array([-10, -5, -2, -1, -0.5, -0.1, 
+                                                     0, 0.1, 0.5, 1, 2, 5, 10]),
+        imag_coeff_walk: Sequence[float] = np.array([-5, -2, -1, 0, 1, 2, 5]),
         n_jobs: int = -1,
-    ):
-        """
-        Initialize the HSG_Generator.
-
-        Parameters
-        ----------
-        z : sp.Symbol
-            Symbol for z in the polynomials, typically z = exp(iK).
-        E : sp.Symbol
-            Symbol for E (energy) in the polynomials.
-        hopping_range : int or list of int
-            Single D value or list of D values (total hopping range p+q)
-            to generate polynomials for. The LaTeX example uses D from 4 to 6.
-        params : Sequence[sp.Symbol]
-            Sequence of parameter symbols (e.g., a, b) to be used as free coefficients.
-            The LaTeX example uses two free coefficients.
-        num_bands : Sequence[int], optional
-            List of number of bands (s) to consider, by default [1, 2, 3].
-        n_jobs : int, optional
-            Number of parallel jobs for computations, by default -1 (use all cores).
-        """
+    ) -> None:
+        
+        self.root_dir = Path(root).expanduser().resolve()
+        if not os.path.exists(self.root_dir):
+            os.makedirs(self.root_dir)
+        
         # Ensure hopping ranges is a list
         if isinstance(hopping_range, int):
             self.hopping_ranges = [hopping_range]
         else:
             self.hopping_ranges = list(hopping_range)
+
         # Ensure num_bands is a list
         if isinstance(num_bands, int):
             self.num_bands = [num_bands]
         else:
             self.num_bands = list(num_bands)
+
         # Assign core attributes
         self.z = z
         self.E = E
         self.params = tuple(params)
         self.n_jobs = n_jobs
+
         # Validity check for parameters
         self.num_params = len(self.params)
         for D_val in self.hopping_ranges:
             assert D_val >= 2, f"hopping_range ({D_val}) must be >= 2"
             # D-2 refers to the number of available intermediate z exponents.
             assert self.num_params <= D_val - 2 if D_val > 2 else self.num_params == 0, \
-                f"num_params (= {self.num_params}) must not exceed D-2 ({D_val-2 if D_val > 2 else 'N/A, D<=2 should have 0 params for this rule'})"
+                f"num_params (= {self.num_params}) must not exceed D-2 " \
+                f"({D_val-2 if D_val > 2 else 'N/A, D<=2 should have 0 params for this rule'})"
+        
+        self.real_coeff_walk = np.array(real_coeff_walk)
+        self.imag_coeff_walk = np.array(imag_coeff_walk)
+        self.single_param_arr = _get_single_param_arr(
+            self.real_coeff_walk,
+            self.imag_coeff_walk,
+        )
+        self.single_param_sweep = self.single_param_arr.ravel()
+
+        # This assumes two free parameters (a,b)
+        # If num_params in HSG_Generator is different, this needs generalization
+        # For now, hardcoding for 2 parameters.
+        if self.num_params == 2:
+            p1_vals_mesh, p2_vals_mesh = np.meshgrid(self.single_param_sweep, self.single_param_sweep)
+            self.param_value_pairs = np.asarray([p1_vals_mesh.ravel(), p2_vals_mesh.ravel()])
+        elif self.num_params == 1:
+            self.param_value_pairs = np.asarray([self.single_param_sweep.ravel()]) # Only one parameter
+        elif self.num_params == 0:
+            self.param_value_pairs = np.array([]) # No parameter values
+        else: # More than 2 params, not covered by example
+            raise ValueError("Parameter generation for >2 free coefficients not explicitly defined by example.")
+
+        # Generate unique polynomial classes
+        print(f"[init] Generating and de-duplicating polynomial classes...")
+        self.all_exprs, self.all_metas = self.generate_char_poly_classes()
+        print(f"[init] Generated {len(self.all_exprs)} unique polynomial classes.")
+        # Save metadata to a file
+        self.save_meta_files(file_name="HSG-generator-meta.npz")
 
 
-    @staticmethod
-    def _one_poly(
-        z: sp.Symbol,
-        E: sp.Symbol,
-        D: int, # Total hopping range, D = p+q
-        params: Tuple[sp.Symbol, ...], # Free coefficients (e.g., a, b)
-        b: int, # Number of bands (s in LaTeX)
-        q: int, # Max positive z exponent in the base term (q_latex in p+q_latex)
-        E_deg_list: Tuple[int, ...], # Exponents for E in additional terms
-        param_pos: Tuple[int, ...], # z exponents where params are inserted
-    ) -> Tuple[Tuple[int, ...], str, sp.Poly, Dict]:
-        """
-        Build a single characteristic polynomial expression, its Sympy Poly object,
-        and metadata describing its construction parameters.
-
-        The construction starts with a base polynomial of the form:
-          P_base(z,E) = -E^s + z^(-p) + z^q
-        where s is the number of bands (`b`), and p+q = D (total hopping range).
-        Additional terms are then incorporated. These terms involve powers of E
-        (up to E^(s-1)) associated with intermediate z-exponents (z^i where
-        i is between -p+1 and q-1, excluding 0). Free parameters (coefficients like 'a', 'b')
-        are assigned to some of these z^i or E^k * z^i terms.
-
-        Parameters
-        ----------
-        z : sp.Symbol
-            Symbol for the complex variable z.
-        E : sp.Symbol
-            Symbol for the energy variable E.
-        D : int
-            Total hopping range (p+q).
-        params : Tuple[sp.Symbol]
-            Symbols for the free coefficients to be included (e.g., a, b).
-        b : int
-            Number of bands (s in LaTeX notation, E^s is the leading energy term).
-        q : int
-            Maximum positive z exponent in the base term (z^q).
-            The corresponding maximum negative exponent is z^(-p) where p = D-q.
-        E_deg_list : Tuple[int]
-            Tuple of exponents for E assigned to each intermediate z-degree.
-            The length of this tuple is D-2. Each exponent k must be in {0,1,...,s-1}.
-        param_pos : Tuple[int]
-            Tuple of z exponents (from the intermediate degrees) at which the
-            parameter symbols from `params` are inserted as coefficients.
-
-        Returns
-        -------
-        final_key : tuple
-            A canonical key (tuple of tuples) representing the polynomial structure,
-            used for de-duplication (handles z-reciprocity).
-        expr_str : str
-            String representation of the expanded polynomial.
-        poly : sp.Poly
-            Sympy Poly object (typically over z, 1/z, E).
-        meta : dict
-            Dictionary containing metadata such as construction parameters,
-            LaTeX representation, and symbols used.
-        """
-        # Compute complementary exponent range
-        p = D - q
-        z_degs = [d for d in range(-p + 1, q) if d != 0]
-
-        # Start with the base polynomial -E^b + z^q + z^{-p}
-        expr = -E**b + z**q + z**(-p)
-        param_map = dict(zip(param_pos, params))
-
-        # Add additional terms based on E_deg_list and parameter positions
-        for z_deg, E_deg in zip(z_degs, E_deg_list):
-            if E_deg > 0 and z_deg in param_map:
-                expr += param_map[z_deg] * E**E_deg * z**z_deg
-            elif E_deg > 0:
-                expr += E**E_deg * z**z_deg
-            elif z_deg in param_map:
-                expr += param_map[z_deg] * z**z_deg
-
-        # Expand, convert to Poly, and gather metadata
-        expr = sp.expand(expr)
-        poly = sp.Poly(expr, z, 1/z, E)
-
-        meta = {
-            'parameter_symbols': tuple(str(p) for p in params),
-            'generator_symbols': tuple(str(g) for g in poly.gens),
-            'latex': sp.latex(expr),
-            'sympy_repr': sp.srepr(poly),
-            'number_of_bands': b,
-            'max_left_hopping': q,
-            'max_right_hopping': p,
-            # Add construction details to metadata for clarity
-            'intermediate_z_degrees': tuple(z_degs),
-            'E_deg_assignments': E_deg_list,
-            'param_degree_placements': param_pos,
-        }
-
-        # Build de-duplication key and its reciprocal
-        flags = [1 if d in param_pos else 0 for d in z_degs]
-        key = list(zip(z_degs, E_deg_list, flags))
-        key_reciprocal = [(-d, e, f) for (d, e, f) in reversed(key)]
-        final_key = min(tuple(key), tuple(key_reciprocal))
-
-        return final_key, str(expr), poly, meta
-
-    def generate_char_poly_classes(
-        self
-    ) -> Tuple[List[str], List[Dict]]:
-        """
-        Generates a comprehensive list of unique characteristic polynomial classes.
-
-        It iterates over specified hopping ranges (D = p+q), number of bands (s),
-        divisions of D into p and q, assignments of E degrees to intermediate z terms,
-        and placements of free parameter symbols (e.g., 'a', 'b').
-
-        Uniqueness is ensured by a canonical keying system that accounts for
-        z-reciprocity (i.e., a polynomial P(z) and its reciprocal P(1/z) often
-        represent physically equivalent systems and map to the same class if their
-        spectra are identical).
-
-        The output (list of polynomial strings and their metadata) forms the basis
-        for generating graph instances. For example, the HSG dataset construction
-        methodology described involves generating 1401 unique classes (24 one-band,
-        275 two-band, 1102 three-band) by varying hopping ranges from 4 to 6 and
-        bands from 1 to 3.
-
-        Returns
-        -------
-        all_exprs : List[str]
-            List of unique polynomial expressions (as strings).
-        all_metas : List[Dict]
-            List of metadata dictionaries, each corresponding to a polynomial
-            in `all_exprs`.
-        """
+    def generate_char_poly_classes(self) -> Tuple[List[str], List[Dict]]:
         all_exprs = []  # accumulator for expression strings
         all_metas = []  # accumulator for corresponding metadata
 
         for D in self.hopping_ranges:
             # Assemble tasks for this D
             tasks = []
-            for b in self.num_bands:
+            for s in self.num_bands:
                 for q in range(1, D):
                     p = D - q
                     degs = [d for d in range(-p + 1, q) if d != 0]
-                    for E_deg_list in it.product(range(b), repeat=D-2):
+                    for E_deg_list in it.product(range(s), repeat=D-2):
                         for pos in it.combinations(degs, len(self.params)):
-                            tasks.append((b, q, E_deg_list, pos))
+                            tasks.append((s, q, E_deg_list, pos))
 
             print(f"[Hopping range = {D}] raw samples: {len(tasks)}")
-            build = partial(self._one_poly, self.z, self.E, D, self.params)
+            build = partial(_one_poly, self.z, self.E, D, self.params)
 
             # Parallel execution of polynomial construction
             results = Parallel(n_jobs=self.n_jobs, backend='loky')(
@@ -282,137 +265,39 @@ class HSG_Generator:
         return all_exprs, all_metas
 
 
-    @staticmethod
-    def _get_single_param_sweep_values(
-        real_coeff_walk: List[float],
-        imag_coeff_walk: List[float],
-    ) -> np.ndarray:
-        """
-        Generate a grid of complex parameter values from real and imaginary walks.
-
-        This method creates a grid of complex values by summing a real part
-        (from `real_coeff_walk`) and an imaginary part (from `imag_coeff_walk`).
-        Each coefficient is formed by summing the real part and the imaginary part
-        (scaled by 1j).
-
-        Parameters
-        ----------
-        real_coeff_walk : List[float]
-            Sequence of real component values for coefficients.
-        imag_coeff_walk : List[float]
-            Sequence of imaginary component values (e.g., [0, 0.5, 1.0] for 0j, 0.5j, 1j).
-
-        Returns
-        -------
-        np.ndarray
-            Array of complex parameter values.
-        """
-        # Convert walks to numpy arrays
-        real_vals = np.array(real_coeff_walk)
-        imag_vals = np.array(imag_coeff_walk)
-        if not np.iscomplex(imag_vals).all():
-            imag_vals = 1j * imag_vals
-            print("imag_coeff_walk converted to complex (1j * imag_vals)")
-        # Sum real + imag parts to form complex parameter grid
-        param_arr = real_vals[:, None] + imag_vals[None, :]
-        return param_arr.ravel()
-
-
-    @staticmethod
-    def generate_ParamTable(
-        save_dir: str,
-        file_name: str,
-        exprs: List[str],
-        metas: List[Dict],
-        real_coeff_walk: List[float],
-        imag_coeff_walk: List[float],
+    def save_meta_files(
+        self,
+        file_name: str = "HSG-generator-meta.npz",
     ) -> None:
-        """
-        Generate and save a parameter table defining the sweep ranges for free coefficients.
 
-        For two free complex coefficients (e.g., 'a' and 'b' defined in HSG_Generator),
-        this method creates a grid of value pairs. Each coefficient is formed by
-        summing a real part (from `real_coeff_walk`) and an imaginary part
-        (from `imag_coeff_walk`, scaled by 1j).
-
-        For example, if `real_coeff_walk` has 13 values and `imag_coeff_walk` has 7
-        imaginary components (e.g., steps for 0j to 5j), this results in 13*7 = 91
-        complex values for one coefficient. If there are two such coefficients,
-        this method generates all (91*91) = 8281 pairs.
-
-        This parameter table (e.g., 'ParamTable.npz') is intended to be used by
-        `generate_dataset` to produce multiple graph samples for each polynomial class.
-
-        Parameters
-        ----------
-        save_dir : str
-            Directory to save the parameter table.
-        file_name : str
-            Name of the output file (NPZ format).
-        exprs : List[str]
-            List of polynomial expressions (strings) to include in the table.
-            These are the unique classes generated by `generate_char_poly_classes`.
-        metas : List[Dict]
-            List of metadata dictionaries, corresponding to each expression in `exprs`.
-        real_coeff_walk : List[float]
-            Sequence of real component values for coefficients.
-        imag_coeff_walk : List[float]
-            Sequence of imaginary component values (e.g., [0, 0.5, 1.0] for 0j, 0.5j, 1j).
-            The method will multiply these by 1j.
-        """
-
-        single_param_sweep_values = HSG_Generator._get_single_param_sweep_values(
-            real_coeff_walk,
-            imag_coeff_walk,
-        )
-        
-        # Generate all ordered pairs (param1_val, param2_val)
-        # This assumes two free parameters, as per LaTeX (a,b)
-        # If num_params in HSG_Generator is different, this needs generalization
-        # For now, hardcoding for 2 parameters.
-        if len(metas) > 0 and metas[0].get('parameter_symbols') and len(metas[0]['parameter_symbols']) == 2:
-            p1_vals_mesh, p2_vals_mesh = np.meshgrid(single_param_sweep_values, single_param_sweep_values)
-            param_value_pairs = np.asarray([p1_vals_mesh.ravel(), p2_vals_mesh.ravel()])
-        elif len(metas) > 0 and metas[0].get('parameter_symbols') and len(metas[0]['parameter_symbols']) == 1:
-            param_value_pairs = np.asarray([single_param_sweep_values.ravel()]) # Only one parameter
-        elif not (len(metas) > 0 and metas[0].get('parameter_symbols')): # No parameters or inconsistent metadata
-             param_value_pairs = np.array([]) # No parameter values
-        else: # More than 2 params, not covered by example
-            raise ValueError("Parameter generation for >2 free coefficients not explicitly defined by example.")
-
-        os.makedirs(save_dir, exist_ok=True)
+        meta_dir = os.path.join(self.root_dir, "meta")
+        os.makedirs(meta_dir, exist_ok=True)
         if not file_name.endswith('.npz'):
             file_name += '.npz'
         
         np.savez(
-            os.path.join(save_dir, file_name),
-            polys=np.array(exprs, dtype=object),
-            metas=np.array(metas, dtype=object),
-            param_vals=param_value_pairs,
+            os.path.join(meta_dir, file_name),
+            polys=np.array(self.all_exprs, dtype=object),
+            metas=np.array(self.all_metas, dtype=object),
+            param_vals=self.param_value_pairs,
         )
-        print(f"Parameter table saved to {os.path.join(save_dir, file_name)}")
-        if param_value_pairs.ndim == 2:
-            print(f"Generated {param_value_pairs.shape[1]} parameter combinations for {param_value_pairs.shape[0]} free coefficient(s).")
-        elif param_value_pairs.ndim == 1 and param_value_pairs.size > 0 :
-             print(f"Generated {param_value_pairs.shape[0]} parameter combinations for 1 free coefficient.")
-        else:
-             print("No parameter combinations generated (likely 0 free coefficients).")
+        print(f"Meta data saved to {os.path.join(meta_dir, file_name)}")
 
 
-    @staticmethod
     def generate_dataset(
+        self,
         class_idx: int,
-        class_data: str = "./ParamTable.npz",
-        save_dir: str = "./raw",
         num_partition: int = 10,
         short_edge_threshold: int = 30,
+        save_dir: str = "raw",
+        class_data: str = "meta/HSG-generator-meta.npz",
     ) -> None:
         """
         Generate and save spectral graph data for a single polynomial class using a
         pre-defined parameter table.
 
         This method loads a specific polynomial expression (identified by `class_idx`)
-        and its associated metadata from the `class_data_file` (e.g., 'ParamTable.npz').
+        and its associated metadata from the `class_data_file` (e.g., 'HSG-generator-meta.npz').
         It retrieves the grid of parameter value pairs (e.g., for coefficients 'a' and 'b')
         also stored in this file. Typically, this grid contains numerous combinations,
         such as (13 real * 7 imag)^2 = 8281 pairs, for systematic exploration.
@@ -434,7 +319,7 @@ class HSG_Generator:
             Index of the polynomial class in the `class_data_file` to process.
         class_data_file : str, optional
             Path to the NPZ file containing polynomial expressions, metadata, and
-            parameter value sweeps (e.g., 'ParamTable.npz'), by default "./ParamTable.npz".
+            parameter value sweeps (e.g., 'HSG-generator-meta.npz'), by default "./HSG-generator-meta.npz".
         save_dir : str, optional
             Directory to save the generated dataset for this class, by default "./raw_class_data".
         num_partitions : int, optional
@@ -442,6 +327,8 @@ class HSG_Generator:
         short_edge_threshold : int, optional
             Threshold for `poly2graph`'s short edge detection, by default 30.
         """
+        save_dir = os.path.join(self.root_dir, save_dir)
+        class_data = os.path.join(self.root_dir, class_data)
         # Define working symbols and parameter dict
         k, z, E, a, b = sp.symbols('k z E a b')
         params = {a, b}
@@ -509,64 +396,203 @@ class HSG_Generator:
         print(f"[Class {class_idx}] Combined dataset saved → {out}")
 
 
-    # --- HSG-topology helper functions --- #
-    @staticmethod
-    def _simple_copy_with_multiplicity(g_multi: nx.MultiGraph):
-        """Collapse a (multi)graph into a simple Graph, recording multiplicity."""
-        if not g_multi.is_multigraph():
-            return g_multi          # already simple, nothing to do
+    def load_class(
+        self,
+        class_idx: int,
+        data_dir: str = "raw",
+    ) -> Tuple[List[nx.Graph], np.ndarray, np.ndarray, Dict]:
+        """
+        Load the NPZ file for a specific class and extract the graphs and metadata.
 
-        g_simple = nx.Graph() if isinstance(g_multi, nx.MultiGraph) else nx.DiGraph()
-        g_simple.add_nodes_from(g_multi.nodes(data=True))
+        Parameters
+        ----------
+        class_idx : int
+            Index of the polynomial class to load.
+        data_dir : str, optional
+            Directory containing the NPZ files, by default "raw".
 
-        for u, v, _k, data in g_multi.edges(keys=True, data=True):
-            if g_simple.has_edge(u, v):
-                g_simple[u][v]["m"] += 1          # bump multiplicity
-            else:
-                g_simple.add_edge(u, v, **data, m=1)
-        return g_simple
-
-    @staticmethod
-    def wl_hash_safe(g, iters=3):
-        """WL hash that tolerates MultiGraphs by collapsing them first."""
-        g_for_hash = HSG_Generator._simple_copy_with_multiplicity(g)
-        return nx.weisfeiler_lehman_graph_hash(
-            g_for_hash,
-            iterations=iters,
-            edge_attr="m"  # include multiplicity in the label
-        )
-
-    def unique_indices_by_hash(self, graphs):
-        hashes = Parallel(n_jobs=self.n_jobs, batch_size=256)(
-            delayed(HSG_Generator.wl_hash_safe)(g) for g in graphs
-        )
-        first_seen = {}
-        for idx, h in enumerate(hashes):
-            first_seen.setdefault(h, idx)
-        return list(first_seen.values())
-
-    @staticmethod
-    def get_topology_mask(class_idx, data_dir='./raw'):
-        path = os.path.join(data_dir, f"class_{class_idx}.npz")
-        graphs_pickle = np.load(path, allow_pickle=True)["graphs_pickle"]
+        Returns
+        -------
+        Tuple[List[nx.Graph], np.ndarray, np.ndarray, Dict]
+            A tuple containing:
+            - List of graphs for the specified class.
+            - Array of 'a' values.
+            - Array of 'b' values.
+            - Metadata dictionary for the class.
+        """
+        path = os.path.join(self.root_dir, data_dir, f"class_{class_idx}.npz")
+        data = np.load(path, allow_pickle=True)
+        graphs_pickle = data["graphs_pickle"]
         graphs = [pickle.loads(g) for g in graphs_pickle]
-        return HSG_Generator.unique_indices_by_hash(graphs)
+        y = data["y"]
+        a_vals = data["a_vals"]
+        b_vals = data["b_vals"]
+        keys = data.files
+        metas = {k: data[k] for k in keys 
+                 if k not in ["graphs_pickle", "y", "a_vals", "b_vals"]}
+        return graphs, y, a_vals, b_vals, metas
 
-    def generate_topology_mask(
-        class_indices: Sequence[int] = range(1, 1401),
+
+    # --- Temporal Graph Selection Functions --- #
+    def get_temporal_mask(self) -> List[List[int]]:
+        """
+        Build the temporal masks that identify every 1-D parameter-sweep
+        (“temporal graph”) inside a single class.
+
+        Under the default settings two complex-valued free coefficients
+        (a,b) are swept over the same 13 × 7 mesh
+
+            Re ∈ self.real_coeff_walk   (13 values)
+            Im ∈ self.imag_coeff_walk   (7 values)
+
+        giving 91 distinct values per coefficient and 91 × 91 = 8 281
+        (a,b) pairs in row-major order:
+
+            (a_idx, b_idx)  →  flat_idx = a_idx*91 + b_idx
+
+        A temporal graph is defined by **fixing one part (Re or Im) of one
+        coefficient** and sweeping the complementary part of the *other*
+        coefficient, so every mask is either 13-long (real sweep) or
+        7-long (imag sweep).
+
+        Returns
+        -------
+        masks : List[List[int]]
+            Each inner list is the list of flat indices (into the
+            8 281-length parameter pair array) that belong to one temporal
+            sequence.
+        """
+        if self.num_params != 2:
+            raise ValueError(
+                "Temporal masks are only defined for exactly two free "
+                "coefficients (a, b) in the current dataset design."
+            )
+
+        n_real, n_imag = self.single_param_arr.shape          # 13, 7
+        param_grid_size = n_real * n_imag                     # 91
+        masks: List[List[int]] = []
+
+        # Helper: map (real_idx, imag_idx) -> flat index in the 91-element list
+        def _coef_flat(r: int, im: int) -> int:
+            return r * n_imag + im
+
+        # ---- 1.  Vary *b* while *a* is fixed --------------------------------
+        for a_r in range(n_real):
+            for a_i in range(n_imag):
+                a_flat = _coef_flat(a_r, a_i)
+
+                # (a fixed, Im[b] fixed) ── sweep Re[b]  ← length 13
+                for b_i in range(n_imag):
+                    seq = [
+                        a_flat * param_grid_size + _coef_flat(b_r, b_i)
+                        for b_r in range(n_real)
+                    ]
+                    masks.append(seq)
+
+                # (a fixed, Re[b] fixed) ── sweep Im[b]  ← length 7
+                for b_r_fixed in range(n_real):
+                    seq = [
+                        a_flat * param_grid_size + _coef_flat(b_r_fixed, b_i)
+                        for b_i in range(n_imag)
+                    ]
+                    masks.append(seq)
+
+        # ---- 2.  Vary *a* while *b* is fixed --------------------------------
+        for b_r in range(n_real):
+            for b_i in range(n_imag):
+                b_flat = _coef_flat(b_r, b_i)
+
+                # (b fixed, Im[a] fixed) ── sweep Re[a]  ← length 13
+                for a_i in range(n_imag):
+                    seq = [
+                        _coef_flat(a_r, a_i) * param_grid_size + b_flat
+                        for a_r in range(n_real)
+                    ]
+                    masks.append(seq)
+
+                # (b fixed, Re[a] fixed) ── sweep Im[a]  ← length 7
+                for a_r_fixed in range(n_real):
+                    seq = [
+                        _coef_flat(a_r_fixed, a_i) * param_grid_size + b_flat
+                        for a_i in range(n_imag)
+                    ]
+                    masks.append(seq)
+
+        # Sanity check (can be removed in production)
+        # Expected: 3 640 masks, 1 274 length-13, 2 366 length-7
+        # assert len(masks) == 3640
+        return masks
+
+
+    def get_temporal_graphs_by_class(
+        self,
+        class_idx: int,
         data_dir: str = "./raw",
-        save_dir: str = "./",
+    ):
+        """
+        Load the NPZ file for a specific class and extract the temporal graphs.
+
+        Parameters
+        ----------
+        class_idx : int
+            Index of the polynomial class to load.
+        data_dir : str, optional
+            Directory containing the NPZ files, by default "./raw".
+
+        Returns
+        -------
+        List[nx.Graph]
+            List of temporal graphs for the specified class.
+        """
+        path = os.path.join(data_dir, f"class_{class_idx}.npz")
+        data = np.load(path, allow_pickle=True)
+        graphs_pickle = data["graphs_pickle"]
+        graphs = [pickle.loads(g) for g in graphs_pickle]
+        temporal_masks = self.get_temporal_mask()
+        temporal_graphs = [graphs[mask] for mask in temporal_masks]
+        return temporal_graphs
+
+
+    # --- Topology Mask Generation Functions --- #
+    def generate_topology_mask(
+        self,
+        class_indices: Sequence[int] = range(1401),
+        wl_hash_iters: int = 3,
+        meta_dir: str = "meta",
+        raw_dir: str = "raw",
+        file_name: str = "HSG-topology-mask.pkl",
     ) -> None:
         """Generate a topology mask for a specific class and save it."""
-        os.makedirs(save_dir, exist_ok=True)
+        meta_dir = os.path.join(self.root_dir, meta_dir)
+        mask_file = os.path.join(meta_dir, file_name)
+        if os.path.exists(mask_file):
+            print(f"Topology mask file already exists: {mask_file}")
+            return self.load_topology_mask(mask_file)
+
+        os.makedirs(meta_dir, exist_ok=True)
+        raw_dir = os.path.join(self.root_dir, raw_dir)
         topology_masks = []
-        for class_idx in class_indices:
-            mask = HSG_Generator.get_topology_mask(class_idx, data_dir)
+        for class_idx in tqdm(class_indices, desc="Generating topology masks"):
+            mask = get_topology_mask(class_idx, raw_dir, wl_hash_iters)
             topology_masks.append(mask)
         
-        with open(os.path.join(save_dir, "HSG-topology-mask.pkl"), "wb") as f:
+        with open(mask_file, "wb") as f:
             pickle.dump(topology_masks, f)
-        print(f"Topology masks saved to {os.path.join(save_dir, 'HSG-topology-mask.pkl')}")
+        print(f"Topology masks saved to {mask_file}")
+
+        return topology_masks
+
+    def load_topology_mask(
+        self,
+        mask_file: str = "meta/HSG-topology-mask.pkl",
+    ) -> List[List[int]]:
+        """Load the topology mask from a file."""
+        mask_file = os.path.join(self.root_dir, mask_file)
+        if not os.path.exists(mask_file):
+            raise FileNotFoundError(f"Topology mask file not found: {mask_file}")
+        with open(mask_file, "rb") as f:
+            topology_masks = pickle.load(f)
+        return topology_masks
 
 
     # --- General Subset Selection Functions --- #
@@ -624,7 +650,7 @@ class HSG_Generator:
         ----------
         metas : list[dict]
             The list returned by :py:meth:`generate_char_poly_classes` (or the
-            loaded ``metas`` array from *ParamTable.npz*).
+            loaded ``metas`` array from *HSG-generator-meta.npz*).
         input_dir : str, default ``"./raw"``
             Folder containing *class_{cid}.npz* archives.
         output_dir : str, default current directory

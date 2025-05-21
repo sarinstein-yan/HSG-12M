@@ -7,7 +7,7 @@ Highlights
 * **Subset‑aware** – choose ``one‑band``, ``two‑band``, ``three‑band``, ``all`` or
   ``topology`` and only the relevant raw files are downloaded and processed.
 * **Lazy metadata bootstrap** – on first construction we fetch the two tiny
-  metadata assets (*ParamTable.npz* + *HSG‑topology‑mask.pkl*) **before** PyG
+  metadata assets (*HSG-generator-meta.npz* + *HSG‑topology‑mask.pkl*) **before** PyG
   inspects :pyattr:`raw_file_names`.  This lets us discover which of the
   ``class_XXX.npz`` blobs are actually required.
 * **Dynamic `raw_file_names`** – the property now lists *only* the files needed
@@ -101,7 +101,7 @@ class HSGOnDisk(OnDiskDataset):
         # 0) make sure the two *tiny* metadata files exist locally
         # ------------------------------------------------------------------
         GH   = "https://raw.githubusercontent.com/sarinstein-yan/HSG-12M/main/assets"
-        meta_files = ["ParamTable.npz", "HSG-topology-mask.pkl"]
+        meta_files = ["HSG-generator-meta.npz", "HSG-topology-mask.pkl"]
         for fname in meta_files:
             fpath = self._raw_root / fname
             if not fpath.exists():
@@ -110,9 +110,9 @@ class HSGOnDisk(OnDiskDataset):
                 urlretrieve(f"{GH}/{fname}", fpath)
 
         # ------------------------------------------------------------------
-        # 1) parse ParamTable → decide which class_*.npz files we need
+        # 1) parse HSG-generator-meta → decide which class_*.npz files we need
         # ------------------------------------------------------------------
-        param = np.load(self._raw_root / "ParamTable.npz", allow_pickle=True)
+        param = np.load(self._raw_root / "HSG-generator-meta.npz", allow_pickle=True)
         metas = param["metas"]
 
         # *this* is the call you wanted – identical logic to _select_class_ids
@@ -120,7 +120,7 @@ class HSGOnDisk(OnDiskDataset):
 
         # Build the raw-file list for this subset
         self._raw_file_names_subset = [
-            "ParamTable.npz",
+            "HSG-generator-meta.npz",
             "HSG-topology-mask.pkl",
             *[f"raw/class_{int(cid)}.npz" for cid in self._required_cids],
         ]
@@ -225,7 +225,7 @@ class HSGOnDisk(OnDiskDataset):
         # --------------------------------------------------------------
         # subset-specific metadata                            (unchanged)
         # --------------------------------------------------------------
-        param = np.load(self._raw_root / "ParamTable.npz", allow_pickle=True)
+        param = np.load(self._raw_root / "HSG-generator-meta.npz", allow_pickle=True)
         metas = param["metas"]
 
         # we already know the class-ID list from __init__
@@ -308,10 +308,10 @@ class HSGOnDisk(OnDiskDataset):
     # Bootstrap helper (download small metadata assets *early*)
     # ------------------------------------------------------------------
     def _ensure_metadata(self) -> None:
-        """Fetch *ParamTable* and the topology mask into :pyattr:`_raw_dir`."""
+        """Fetch *HSG-generator-meta* and the topology mask into :pyattr:`_raw_dir`."""
         self._raw_dir.mkdir(parents=True, exist_ok=True)
         gh = "https://raw.githubusercontent.com/sarinstein-yan/HSG-12M/main/assets"
-        _download_url(f"{gh}/ParamTable.npz", self._raw_dir / "ParamTable.npz")
+        _download_url(f"{gh}/HSG-generator-meta.npz", self._raw_dir / "HSG-generator-meta.npz")
         _download_url(f"{gh}/HSG-topology-mask.pkl", self._raw_dir / "HSG-topology-mask.pkl")
 
 
