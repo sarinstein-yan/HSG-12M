@@ -90,6 +90,42 @@ def _one_poly(
     return final_key, str(expr), poly, meta
 
 
+def load_class(
+    class_idx: int,
+    raw_dir: str = "raw",
+) -> Tuple[List[nx.Graph], np.ndarray, np.ndarray, Dict]:
+    """
+    Load the NPZ file for a specific class and extract the graphs and metadata.
+
+    Parameters
+    ----------
+    class_idx : int
+        Index of the polynomial class to load.
+    raw_dir : str, optional
+        Directory containing the NPZ files, by default "raw".
+
+    Returns
+    -------
+    Tuple[List[nx.Graph], np.ndarray, np.ndarray, Dict]
+        A tuple containing:
+        - List of graphs for the specified class.
+        - Array of 'a' values.
+        - Array of 'b' values.
+        - Metadata dictionary for the class.
+    """
+    path = os.path.join(raw_dir, f"class_{class_idx}.npz")
+    data = np.load(path, allow_pickle=True)
+    graphs_pickle = data["graphs_pickle"]
+    graphs = [pickle.loads(g) for g in graphs_pickle]
+    y = data["y"]
+    a_vals = data["a_vals"]
+    b_vals = data["b_vals"]
+    keys = data.files
+    metas = {k: data[k] for k in keys 
+                if k not in ["graphs_pickle", "y", "a_vals", "b_vals"]}
+    return graphs, y, a_vals, b_vals, metas
+
+
 # --- HSG-topology helper functions --- #
 def _simple_copy_with_multiplicity(g_multi: nx.MultiGraph):
     """Collapse a (multi)graph into a simple Graph, recording multiplicity."""
@@ -150,7 +186,7 @@ class HSG_Generator:
     """
     def __init__(
         self,
-        root: str = './',
+        root: str = '.',
         z: sp.Symbol = sp.Symbol('z'),
         E: sp.Symbol = sp.Symbol('E'),
         params: Sequence[sp.Symbol] = (sp.Symbol('a'), sp.Symbol('b')),
@@ -399,7 +435,7 @@ class HSG_Generator:
     def load_class(
         self,
         class_idx: int,
-        data_dir: str = "raw",
+        raw_dir: str = "raw",
     ) -> Tuple[List[nx.Graph], np.ndarray, np.ndarray, Dict]:
         """
         Load the NPZ file for a specific class and extract the graphs and metadata.
@@ -408,7 +444,7 @@ class HSG_Generator:
         ----------
         class_idx : int
             Index of the polynomial class to load.
-        data_dir : str, optional
+        raw_dir : str, optional
             Directory containing the NPZ files, by default "raw".
 
         Returns
@@ -420,17 +456,8 @@ class HSG_Generator:
             - Array of 'b' values.
             - Metadata dictionary for the class.
         """
-        path = os.path.join(self.root_dir, data_dir, f"class_{class_idx}.npz")
-        data = np.load(path, allow_pickle=True)
-        graphs_pickle = data["graphs_pickle"]
-        graphs = [pickle.loads(g) for g in graphs_pickle]
-        y = data["y"]
-        a_vals = data["a_vals"]
-        b_vals = data["b_vals"]
-        keys = data.files
-        metas = {k: data[k] for k in keys 
-                 if k not in ["graphs_pickle", "y", "a_vals", "b_vals"]}
-        return graphs, y, a_vals, b_vals, metas
+        raw_dir = os.path.join(self.root_dir, raw_dir)
+        return load_class(class_idx, raw_dir)
 
 
     # --- Temporal Graph Selection Functions --- #
@@ -527,7 +554,7 @@ class HSG_Generator:
     def get_temporal_graphs_by_class(
         self,
         class_idx: int,
-        data_dir: str = "./raw",
+        raw_dir: str = "raw",
     ):
         """
         Load the NPZ file for a specific class and extract the temporal graphs.
@@ -536,7 +563,7 @@ class HSG_Generator:
         ----------
         class_idx : int
             Index of the polynomial class to load.
-        data_dir : str, optional
+        raw_dir : str, optional
             Directory containing the NPZ files, by default "./raw".
 
         Returns
@@ -544,12 +571,11 @@ class HSG_Generator:
         List[nx.Graph]
             List of temporal graphs for the specified class.
         """
-        path = os.path.join(data_dir, f"class_{class_idx}.npz")
-        data = np.load(path, allow_pickle=True)
-        graphs_pickle = data["graphs_pickle"]
-        graphs = [pickle.loads(g) for g in graphs_pickle]
+        graphs, y, *_ = self.load_class(class_idx, raw_dir)
         temporal_masks = self.get_temporal_mask()
-        temporal_graphs = [graphs[mask] for mask in temporal_masks]
+        from operator import itemgetter
+        temporal_graphs = [itemgetter(*mask)(graphs) 
+                           for mask in temporal_masks]
         return temporal_graphs
 
 

@@ -1,89 +1,40 @@
-from __future__ import annotations
-
-"""PyG **On‑disk** dataset wrapper for the 12‑million‑graph *HSG* corpus.
-
-Highlights
-==========
-* **Subset‑aware** – choose ``one‑band``, ``two‑band``, ``three‑band``, ``all`` or
-  ``topology`` and only the relevant raw files are downloaded and processed.
-* **Lazy metadata bootstrap** – on first construction we fetch the two tiny
-  metadata assets (*HSG-generator-meta.npz* + *HSG‑topology‑mask.pkl*) **before** PyG
-  inspects :pyattr:`raw_file_names`.  This lets us discover which of the
-  ``class_XXX.npz`` blobs are actually required.
-* **Dynamic `raw_file_names`** – the property now lists *only* the files needed
-  for the chosen subset so PyG never complains about missing placeholders.
-* **Subset‑scoped root folder** – each subset lives in its own sub‑directory
-  (``<root>/<subset>/``) so you can keep multiple variants side‑by‑side without
-  collisions.
-
-Usage
------
-```python
-from hsg_dataset import HSGOnDisk
-
-dset = HSGOnDisk("~/data/HSG", subset="two-band", n_jobs=8)
-print(len(dset), "graphs", dset.num_classes, "classes")
-```
-"""
-
-import shutil
+import os.path as osp
+import pickle
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set
-
-import networkx as nx
 import numpy as np
-import pickle
-import requests
+import networkx as nx
 from urllib.request import urlretrieve
 import torch
-from joblib import Parallel, delayed
+from torch_geometric.data import Data, OnDiskDataset, InMemoryDataset
 from tqdm import tqdm
-from torch_geometric.data import OnDiskDataset, InMemoryDataset
-
-# ---------------------------------------------------------------------------
-# Helper utilities (stand‑alone – no torch_geometric imports here)
-# ---------------------------------------------------------------------------
-
-def _download_url(url: str, dst: Path, *, desc: str = "", overwrite: bool = False) -> None:
-    """Stream *url* → *dst* with a tqdm progress‑bar."""
-    if dst.exists() and not overwrite:
-        return
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        with tqdm.wrapattr(r.raw, "read", total=total, desc=desc or dst.name) as raw:
-            with open(dst, "wb") as f:
-                shutil.copyfileobj(raw, f)
+from joblib import Parallel, delayed
+from typing import Dict, List, Optional, Sequence, Set
+from easyDataverse import Dataverse
 
 
-def _dataverse_file_map() -> Dict[str, int]:
-    """Return *filename → file‑ID* mapping for the Harvard Dataverse record."""
-    api = (
-        "https://dataverse.harvard.edu/api/datasets/:persistentId"
-        "?persistentId=doi:10.7910/DVN/PYDSSQ"
-    )
-    js = requests.get(api, timeout=30).json()
-    files = js["data"]["latestVersion"]["files"]
-    return {f["dataFile"]["filename"]: f["dataFile"]["id"] for f in files}
+def _select_class_ids(subset: str, metas: np.ndarray) -> np.ndarray:
+    bands = np.array([m["number_of_bands"] for m in metas])
+    match subset:
+        case "one-band" | None:
+            return np.where(bands == 1)[0]
+        case "two-band":
+            return np.where(bands == 2)[0]
+        case "three-band":
+            return np.where(bands == 3)[0]
+        case "all":
+            return np.arange(len(metas))
+        case "topology":
+            return np.arange(len(metas))
+        case _:
+            raise ValueError(f"Unknown subset: {subset}. Expected one of: "\
+                             "'one-band', 'two-band', 'three-band', 'all', 'topology'")
 
-
-# ---------------------------------------------------------------------------
-# Main dataset class
-# ---------------------------------------------------------------------------
 class HSGOnDisk(OnDiskDataset):
     """On‑disk PyG wrapper around the HSG‑12M corpus (1401 classes)."""
-
-    #: total count of *possible* raw class archives on Dataverse
-    TOTAL_NUM_CLASSES: int = 1401
-
-    # ---------------------------------------------------------------------
-    # Construction helpers
-    # ---------------------------------------------------------------------
     def __init__(
         self,
-        root: str | Path,
+        root: str | Path = ".",
         subset: str | None = "one-band",
         *,
         n_jobs: int = -1,
@@ -91,72 +42,86 @@ class HSGOnDisk(OnDiskDataset):
         transform=None,
         pre_filter=None,
     ) -> None:
-        self._raw_root = Path(root).expanduser().resolve()
+        
+        self.root = Path(root).expanduser().resolve()
+        self.meta_dir = self.root / "meta"
+
         self.subset = (subset or "one-band").lower()
         if self.subset in {"all", "all-static"}:
             self.subset = "all"
         self.n_jobs = n_jobs
 
-        # ------------------------------------------------------------------
-        # 0) make sure the two *tiny* metadata files exist locally
-        # ------------------------------------------------------------------
+        # download two meta files if they are missing
         GH   = "https://raw.githubusercontent.com/sarinstein-yan/HSG-12M/main/assets"
         meta_files = ["HSG-generator-meta.npz", "HSG-topology-mask.pkl"]
         for fname in meta_files:
-            fpath = self._raw_root / fname
+            fpath = self.meta_dir / fname
             if not fpath.exists():
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 print(f"[HSG] downloading {fname} …")
                 urlretrieve(f"{GH}/{fname}", fpath)
 
-        # ------------------------------------------------------------------
-        # 1) parse HSG-generator-meta → decide which class_*.npz files we need
-        # ------------------------------------------------------------------
-        param = np.load(self._raw_root / "HSG-generator-meta.npz", allow_pickle=True)
+        # parse HSG-generator-meta and decide which class_*.npz files we need
+        param = np.load(self.meta_dir / "HSG-generator-meta.npz", allow_pickle=True)
         metas = param["metas"]
+        self.required_classes = _select_class_ids(self.subset, metas)
 
-        # *this* is the call you wanted – identical logic to _select_class_ids
-        self._required_cids = self._select_class_ids(metas)
+        self.server_url = "https://dataverse.harvard.edu"
+        self.dataset_pid = "doi:10.7910/DVN/PYDSSQ"
 
         # Build the raw-file list for this subset
-        self._raw_file_names_subset = [
-            "HSG-generator-meta.npz",
-            "HSG-topology-mask.pkl",
-            *[f"raw/class_{int(cid)}.npz" for cid in self._required_cids],
-        ]
+        self._raw_files = [f"class_{int(cid)}.npz" for cid in self.required_classes]
 
-        # processed data live in a subset-specific folder
-        processed_root = self._raw_root / f"processed_{self.subset}"
+        # # processed data live in a subset-specific folder
+        # processed_root = self.root / f"processed_{self.subset}"
 
         super().__init__(
-            root=str(processed_root),
+            root=self.root,
             transform=transform,
             pre_filter=pre_filter,
             backend=backend,
         )
 
-    # ------------------------------------------------------------------
     # torch_geometric.Dataset hooks
-    # ------------------------------------------------------------------
     @property
     def raw_file_names(self) -> List[str]:  # type: ignore[override]
         """Only the files needed for *this* subset."""
-        return self._raw_file_names_subset
+        return self._raw_files
+
+    @property
+    def processed_dir(self) -> str:
+        return osp.join(self.root, f"processed_{self.subset}")
 
     # processed_file_names is inherited from OnDiskDataset ("<backend>.db")
 
-    # ------------------------------------------------------------------
     # Label mapping helpers (shared across workers)
-    # ------------------------------------------------------------------
     _label_map: Dict[int, int] = {}
 
     @classmethod
     def _set_label_map(cls, mapping: Dict[int, int]) -> None:
         cls._label_map = mapping
 
-    # ------------------------------------------------------------------
+    def download(self):
+        """Download *only* the files listed in :pyattr:`raw_file_names`."""
+        to_download =  []
+        for fname in self._raw_files:
+            fpath = osp.join(self.raw_dir, fname)
+            if not osp.exists(fpath):
+                to_download.append(f'raw/{fname}')
+        
+        if not to_download:
+            return
+
+        print(f"[HSG] Downloading {len(to_download)} files ({to_download}) …")
+        dv = Dataverse(self.server_url)
+        hsg = dv.load_dataset(
+            pid=self.dataset_pid, 
+            filedir=self.root,
+            filenames=to_download,
+            download_files=True,
+        )
+
     # Graph attribute stripping
-    # ------------------------------------------------------------------
     @staticmethod
     def _process_edge_pts(graph: nx.MultiGraph) -> nx.MultiGraph:
         """Return a *new* graph with compact node / edge attributes."""
@@ -197,48 +162,17 @@ class HSGOnDisk(OnDiskDataset):
         data.y = torch.tensor([dense], dtype=torch.long)
         return data
 
-    # ------------------------------------------------------------------
-    # Subset helpers
-    # ------------------------------------------------------------------
-    def _select_class_ids(self, metas: np.ndarray) -> np.ndarray:
-        bands = np.array([m["number_of_bands"] for m in metas])
-        match self.subset:
-            case "one-band" | "none":
-                return np.where(bands == 1)[0]
-            case "two-band":
-                return np.where(bands == 2)[0]
-            case "three-band":
-                return np.where(bands == 3)[0]
-            case "all":
-                return np.arange(len(metas))
-            case "topology":
-                return np.arange(len(metas))  # mask later
-        raise ValueError(f"Unknown subset: {self.subset}")
-
-    # ------------------------------------------------------------------
-    # Heavy lifting – executed once per subset when the DB is absent
-    # ------------------------------------------------------------------
     def process(self) -> None:  # type: ignore[override]
         """Convert raw *.npz* files → on-disk DB (dense labels)."""
-        from tqdm import tqdm
-
-        # --------------------------------------------------------------
-        # subset-specific metadata                            (unchanged)
-        # --------------------------------------------------------------
-        param = np.load(self._raw_root / "HSG-generator-meta.npz", allow_pickle=True)
-        metas = param["metas"]
-
-        # we already know the class-ID list from __init__
-        class_ids = self._required_cids
-
         # dense label map *for this subset*
+        class_ids = self.required_classes
         label_map = {int(old): new for new, old in enumerate(sorted(map(int, class_ids)))}
         self._set_label_map(label_map)
 
         # optional topology masks
         topo_masks: Optional[Sequence[Sequence[int]]] = None
         if self.subset == "topology":
-            topo_masks = pickle.load(open(self._raw_root / "HSG-topology-mask.pkl", "rb"))
+            topo_masks = pickle.load(open(self.root / "HSG-topology-mask.pkl", "rb"))
 
         # make sure DB exists before parallel inserts
         _ = self.db
@@ -247,9 +181,9 @@ class HSGOnDisk(OnDiskDataset):
         worker = Parallel(n_jobs=self.n_jobs, backend="loky")
         total = 0
 
-        for cid in tqdm(self._required_cids, desc="Processing classes"):
-            arr = np.load(self._raw_dir / f"class_{cid}.npz", allow_pickle=True)
-            pickled = arr["graphs_pickle"]
+        for cid in tqdm(self.required_classes, desc="Processing classes"):
+            data = np.load(osp.join(self.raw_dir, f"class_{cid}.npz"), allow_pickle=True)
+            pickled = data["graphs_pickle"]
             nx_graphs = threader(delayed(pickle.loads)(buf) for buf in pickled)
 
             allowed: Optional[Set[int]] = None
@@ -263,7 +197,7 @@ class HSGOnDisk(OnDiskDataset):
                 delayed(self._graph_to_data)(g, cid) for g in selected
             )
             if self.pre_filter is not None:
-                data_list = [d for d in data_list if self.pre_filter(d)]
+                data_list = [self.pre_filter(d) for d in data_list]
             if self.pre_transform is not None:
                 data_list = [self.pre_transform(d) for d in data_list]
 
@@ -273,58 +207,17 @@ class HSGOnDisk(OnDiskDataset):
         if self.log:
             print(f"[{self.__class__.__name__}] Stored {total} graphs → {self.processed_paths[0]}")
 
-    # ------------------------------------------------------------------
     # Convenience
-    # ------------------------------------------------------------------
     @property
     def num_classes(self) -> int:  # type: ignore[override]
         return len(self._label_map)
 
-    # ------------------------------------------------------------------
-    # Download logic
-    # ------------------------------------------------------------------
-    def download(self) -> None:  # type: ignore[override]
-        """Download *only* the files listed in :pyattr:`raw_file_names`."""
-        self._raw_dir.mkdir(parents=True, exist_ok=True)
-
-        # small assets are guaranteed present by _ensure_metadata(); we just have to
-        # fetch the potentially large class archives.
-        to_get = [p for p in self._raw_file_list if p.startswith("class_")]
-        if not to_get:
-            return  # nothing to do (rare)
-
-        fname2id = _dataverse_file_map()
-        for fname in tqdm(to_get, desc="Downloading .npz blobs"):
-            cid = int(fname.split("_")[1].split(".")[0])
-            dst = self._raw_dir / fname
-            if dst.exists():
-                continue
-            fid = fname2id[fname]
-            url = f"https://dataverse.harvard.edu/api/access/datafile/{fid}?format=original"
-            _download_url(url, dst, desc=fname)
-        time.sleep(0.2)  # flush dir cache on some filesystems
-
-    # ------------------------------------------------------------------
-    # Bootstrap helper (download small metadata assets *early*)
-    # ------------------------------------------------------------------
-    def _ensure_metadata(self) -> None:
-        """Fetch *HSG-generator-meta* and the topology mask into :pyattr:`_raw_dir`."""
-        self._raw_dir.mkdir(parents=True, exist_ok=True)
-        gh = "https://raw.githubusercontent.com/sarinstein-yan/HSG-12M/main/assets"
-        _download_url(f"{gh}/HSG-generator-meta.npz", self._raw_dir / "HSG-generator-meta.npz")
-        _download_url(f"{gh}/HSG-topology-mask.pkl", self._raw_dir / "HSG-topology-mask.pkl")
-
-
-# ======================================================================
-#                Memory‑resident variant
-# ======================================================================
 
 class HSGInMemory(InMemoryDataset):
-    """Load the *dense‑labelled* on‑disk DB into system RAM."""
-
+    """In‑memory PyG wrapper around the HSG‑12M corpus (1401 classes)."""
     def __init__(
         self,
-        root: str | Path,
+        root: str | Path = ".",
         subset: Optional[str] = "one-band",
         *,
         backend: str = "sqlite",
@@ -343,9 +236,11 @@ class HSGInMemory(InMemoryDataset):
         # pull the cached, collated tensors into memory
         self.load(self.processed_paths[0])
 
-    # ------------------------------------------------------------------
     # Dataset hooks
-    # ------------------------------------------------------------------
+    @property
+    def processed_dir(self) -> str:
+        return osp.join(self.root, f"processed_{self.subset}")
+
     @property
     def processed_file_names(self) -> List[str]:  # type: ignore[override]
         return [f"data_{self.subset}.pt"]
@@ -360,11 +255,14 @@ class HSGInMemory(InMemoryDataset):
             pre_filter=None,
         )
 
-        data_list = [on_disk.get(i) for i in range(len(on_disk))]
+        # data_list = [on_disk.get(i) for i in range(len(on_disk))]
+        data_list = []
+        for i in tqdm(range(len(on_disk)), desc="processing graphs"):
+            data_list.append(on_disk.get(i))
 
         # user hooks
         if self.pre_filter is not None:
-            data_list = [d for d in data_list if self.pre_filter(d)]
+            data_list = [self.pre_filter(d) for d in data_list]
         if self.pre_transform is not None:
             data_list = [self.pre_transform(d) for d in data_list]
 
@@ -374,52 +272,34 @@ class HSGInMemory(InMemoryDataset):
         # cache num‑classes for quick access
         self._num_classes = on_disk.num_classes
 
-    # ------------------------------------------------------------------
     # Convenience
-    # ------------------------------------------------------------------
     @property
     def num_classes(self) -> int:  # type: ignore[override]
         return getattr(self, "_num_classes", None) or int(self.data.y.max().item() + 1)
 
 
-if __name__ == "__main__":
-    # Test the dataset
-    print("Processing one-band subset...")
-    ds = HSGInMemory(root="/mnt/ssd/nhsg12m", subset="one-band")
-    print("one-band subset processed.")
-    print(f"Number of classes: {ds.num_classes}")
-    print(f"Number of graphs: {len(ds)}")
-    print(f"Raw files: {ds.raw_file_names}")
-    print(f"Processed files: {ds.processed_file_names}")
+# import shutil
+# import requests
 
-    print("Processing two-band subset...")
-    ds = HSGInMemory(root="/mnt/ssd/nhsg12m", subset="two-band")
-    print("two-band subset processed.")
-    print(f"Number of classes: {ds.num_classes}")
-    print(f"Number of graphs: {len(ds)}")
-    print(f"Raw files: {ds.raw_file_names}")
-    print(f"Processed files: {ds.processed_file_names}")
+# # Helper utilities (stand‑alone – no torch_geometric imports here)
+# def _download_url(url: str, dst: Path, *, desc: str = "", overwrite: bool = False) -> None:
+#     """Stream *url* → *dst* with a tqdm progress‑bar."""
+#     if dst.exists() and not overwrite:
+#         return
+#     dst.parent.mkdir(parents=True, exist_ok=True)
+#     with requests.get(url, stream=True, timeout=60) as r:
+#         r.raise_for_status()
+#         total = int(r.headers.get("content-length", 0))
+#         with tqdm.wrapattr(r.raw, "read", total=total, desc=desc or dst.name) as raw:
+#             with open(dst, "wb") as f:
+#                 shutil.copyfileobj(raw, f)
 
-    print("Processing three-band subset...")
-    ds = HSGInMemory(root="/mnt/ssd/nhsg12m", subset="three-band")
-    print("three-band subset processed.")
-    print(f"Number of classes: {ds.num_classes}")
-    print(f"Number of graphs: {len(ds)}")
-    print(f"Raw files: {ds.raw_file_names}")
-    print(f"Processed files: {ds.processed_file_names}")
 
-    print("Processing all subset...")
-    ds = HSGInMemory(root="/mnt/ssd/nhsg12m", subset="all")
-    print("all subset processed.")
-    print(f"Number of classes: {ds.num_classes}")
-    print(f"Number of graphs: {len(ds)}")
-    print(f"Raw files: {ds.raw_file_names}")
-    print(f"Processed files: {ds.processed_file_names}")
-
-    print("Processing topology subset...")
-    ds = HSGOnDisk(root="/mnt/ssd/nhsg12m", subset="topology")
-    print("topology subset processed.")
-    print(f"Number of classes: {ds.num_classes}")
-    print(f"Number of graphs: {len(ds)}")
-    print(f"Raw files: {ds.raw_file_names}")
-    print(f"Processed files: {ds.processed_file_names}")
+# def _dataverse_file_map() -> Dict[str, int]:
+#     api = (
+#         "https://dataverse.harvard.edu/api/datasets/:persistentId"
+#         "?persistentId=doi:10.7910/DVN/PYDSSQ"
+#     )
+#     js = requests.get(api, timeout=30).json()
+#     files = js["data"]["latestVersion"]["files"]
+#     return {f["dataFile"]["filename"]: f["dataFile"]["id"] for f in files}

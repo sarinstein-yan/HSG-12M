@@ -1,24 +1,14 @@
 """
 Benchmark script for HSG-12M GNN baselines.
 
-Changes versus the original reference implementation
-----------------------------------------------------
-* **Model choices**: ["gcn", "sage", "gat", "gatv2", "gin", "gine"].
-* **Learning-rate scheduler**: `CosineAnnealingWarmRestarts`.
-* **Initial learning-rate**: *default* (set via `--lr`).  
-  If you really want the literal 1e3 requested in the prompt, run with
-  `--lr 1000` - but that will almost certainly diverge.
-* **All baselines run in one invocation** - the script loops over the
-  model list and produces one CSV (+ summary) per architecture.
-
 Usage
 -----
 ```bash
-python benchmark_hsg_12m.py --root /path/to/HSG-12M \
-       --subset one-band --epochs 100
+python src/hsg/training.py  \
+    --root /path/to/HSG-12M \
+    --subset one-band --epochs 100 \
+    ...
 ```
-
-Optional arguments such as `--models gcn gin` or `--lr 5e-4` are honoured.
 """
 
 __all__ = [
@@ -46,8 +36,8 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torchmetrics import Accuracy, F1Score, AUROC, AveragePrecision
 
-from polygraphs_dataset import PolyGraphInMemoryDataset
-from gnn_baselines import get_model_instance
+from hsg.pyg import HSGInMemory
+from hsg.gnn_baselines import get_model_instance
 
 # ---------------------------------------------------------------------------
 # DataModule
@@ -61,11 +51,11 @@ class HSGLitDataModule(pl.LightningDataModule):
 
     def prepare_data(self):
         # trigger initial download / processing
-        _ = PolyGraphInMemoryDataset(self.root, self.subset)
+        _ = HSGInMemory(self.root, self.subset)
 
     def setup(self, stage=None):
         self.datasets = []
-        full = PolyGraphInMemoryDataset(self.root, self.subset)
+        full = HSGInMemory(self.root, self.subset)
         y_all = full.y.numpy()
 
         for seed in self.seeds:
@@ -246,13 +236,14 @@ def summarise_csv(csv_in, csv_out):
 from argparse import Namespace
 def run_experiment(args: Namespace):
     """
-    Train/validate/test all requested GNN architectures for one subset/seeds combo.
+    Train/validate/test all requested GNN architectures.
+
     Args
     ----
-    args : argparse.Namespace – fields identical to the old CLI.
+    args : argparse.Namespace – fields identical to the `src/hsg/training.py` script
     """
     # ---------- house-keeping ----------
-    save_path = args.save_dir / args.subset
+    save_path = Path(args.save_dir) / args.subset
     save_path.mkdir(parents=True, exist_ok=True)
 
     if args.models == ["all"]:
