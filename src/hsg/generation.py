@@ -283,6 +283,42 @@ class HSG_Generator:
 
 
     @staticmethod
+    def _get_single_param_sweep_values(
+        real_coeff_walk: List[float],
+        imag_coeff_walk: List[float],
+    ) -> np.ndarray:
+        """
+        Generate a grid of complex parameter values from real and imaginary walks.
+
+        This method creates a grid of complex values by summing a real part
+        (from `real_coeff_walk`) and an imaginary part (from `imag_coeff_walk`).
+        Each coefficient is formed by summing the real part and the imaginary part
+        (scaled by 1j).
+
+        Parameters
+        ----------
+        real_coeff_walk : List[float]
+            Sequence of real component values for coefficients.
+        imag_coeff_walk : List[float]
+            Sequence of imaginary component values (e.g., [0, 0.5, 1.0] for 0j, 0.5j, 1j).
+
+        Returns
+        -------
+        np.ndarray
+            Array of complex parameter values.
+        """
+        # Convert walks to numpy arrays
+        real_vals = np.array(real_coeff_walk)
+        imag_vals = np.array(imag_coeff_walk)
+        if not np.iscomplex(imag_vals).all():
+            imag_vals = 1j * imag_vals
+            print("imag_coeff_walk converted to complex (1j * imag_vals)")
+        # Sum real + imag parts to form complex parameter grid
+        param_arr = real_vals[:, None] + imag_vals[None, :]
+        return param_arr.ravel()
+
+
+    @staticmethod
     def generate_ParamTable(
         save_dir: str,
         file_name: str,
@@ -324,16 +360,12 @@ class HSG_Generator:
             Sequence of imaginary component values (e.g., [0, 0.5, 1.0] for 0j, 0.5j, 1j).
             The method will multiply these by 1j.
         """
-        # Convert walks to numpy arrays
-        real_vals = np.array(real_coeff_walk)
-        imag_vals = np.array(imag_coeff_walk)
-        if not np.iscomplex(imag_vals).all():
-            imag_vals = 1j * imag_vals
-            print("imag_coeff_walk converted to complex (1j * imag_vals)")
-        # Sum real + imag parts to form complex parameter grid
-        param_arr = real_vals[:, None] + imag_vals[None, :]
-        single_param_sweep_values = param_arr.ravel()
 
+        single_param_sweep_values = HSG_Generator._get_single_param_sweep_values(
+            real_coeff_walk,
+            imag_coeff_walk,
+        )
+        
         # Generate all ordered pairs (param1_val, param2_val)
         # This assumes two free parameters, as per LaTeX (a,b)
         # If num_params in HSG_Generator is different, this needs generalization
