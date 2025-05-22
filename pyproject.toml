@@ -36,7 +36,7 @@ classifiers = [
     "Environment :: GPU :: NVIDIA CUDA"
 ]
 dependencies = [
-    "torch>=2.5",
+    "torch~=2.5",
     "lightning",
     "torch_geometric",
     "tensorboard",
