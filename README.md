@@ -3,10 +3,11 @@
 HSG-12M Spatial Multigraph Dataset.
 
 This repository contains the code in the companion paper "HSG-12M: A Large-Scale Spatial Multigraph Dataset":
-- the code for generation of HSG-12M
-- the code to derive the six dataset variants, and generic custom subsets
-- the code for preliminary featurization and processing to PyTorch Geometric Dataset (both in memory and on disk)
-- the code for benchmarking on GNN baseline models
+- downloading of the raw data files
+- preliminary featurization and processing to PyTorch Geometric Dataset (both in memory and on disk)
+- benchmarking on GNN baseline models
+- generation of the HSG-12M
+- deriving the six dataset variants, and generic custom subsets
 
 The 1401 data files are publicly available at [Dataverse](https://doi.org/10.7910/DVN/PYDSSQ).
 
@@ -104,7 +105,7 @@ $ python -m src/hsg/training.py \
     --early_stop_patience 10
 ```
 
-To run interactively, use `hsg.run_experiment(args: argparse.Namespace)` (source code in `src/hsg/training.py`) to run the experiment interactively (in IPython or Jupyter Notebook):
+To run interactively, use `hsg.run_experiment(args: argparse.Namespace)` (source code in `src/hsg/training.py`) to run the experiment in IPython or Jupyter Notebook:
 
 ```python
 from argparse import Namespace
@@ -150,37 +151,37 @@ hsg12m = dv.load_dataset(
 print(hsg12m.citation)
 ```
 
----
 
 ### Content of each file
-Each partitioned `.npz` file stores spectral graph data generated from one **polynomial class**. These files are created by the `hsg.HSG_Generator.generate_dataset(...)` method and are named as: `class_{class_index}.npz`. (See [HSG-12M generation](#hsg-12m-generation) )
+---
+Each file stores spectral graph data generated from one **polynomial class**. These files are created by the `hsg.HSG_Generator.generate_dataset(...)` method and are named as: `class_{class_index}.npz`. (See [HSG-12M generation](#hsg-12m-generation))
 
 | Key             | Type            | Meaning |
 |------------------|------------------|---------|
-| `graphs_pickle` | `List[bytes]`    | List of **serialized NetworkX MultiGraph objects**, each corresponding to a unique `(a, b)` parameter pair. |
-| `y`             | `int`            | Class label for the graphs in this partition. | 
-| `a_vals`        | `np.ndarray`     | List of parameter values for `a` used in this partition. |
-| `b_vals`        | `np.ndarray`     | List of parameter values for `b` used in this partition. |
-| `class_meta`    | `Dict[str, Any]` | Class-level metadata, including polynomial and Hamiltonian information. |
+| `graphs_pickle` | `List[bytes]`    | List of **serialized NetworkX MultiGraph objects**, each corresponding to a `(a, b)` parameter pair. |
+| `y`             | `int`            | Class label. | 
+| `a_vals`        | `np.ndarray`     | List of parameter values for `a` used. |
+| `b_vals`        | `np.ndarray`     | List of parameter values for `b` used. |
+| `class_meta`    | `Dict[str, Any]` | Class-level metadata, including polynomial class and Hamiltonian information. |
 
 **Note:** Except for `y` and `class_meta` which are class-level, the other three are **aligned by index**, i.e., the $i$-th graph in `graphs_pickle` was generated using `a = a_vals[i]` and `b = b_vals[i]`.
 
----
 
 ### Content of `class_meta`
+---
 
 | Key | Type | Meaning |
 |-----|------|---------|
-| `parameter_symbols` | `Tuple[str, …]` | Names of the free coefficients inserted into the polynomial (e.g. `('a', 'b')`). |
-| `generator_symbols` | `Tuple[str, …]` | The SymPy generator ordering used inside `sp.Poly` — normally `('z', '1/z', 'E')`. |
+| `parameter_symbols` | `Tuple[str, …]` | Symbols of the free coefficients inserted into the polynomial (e.g. `('a', 'b')`). |
 | `latex` | `str` | LaTeX code for the fully-expanded polynomial. |
-| `sympy_repr` | `str` | Result of `sp.srepr(poly)` – a machine-readable AST for exact reconstruction. |
-| `number_of_bands` | `int` | Number of bands $b$ (= highest exponent of `E` in the base term `-E**b`). |
-| `max_left_hopping` | `int` | Positive exponent $q$ in the base term `z**q`. |
-| `max_right_hopping` | `int` | Complementary exponent $p = D - q$ in the base term `z**(-p)`. |
-| `intermediate_z_degrees` | `Tuple[int, …]` | All non-zero $z$-exponents that lie **between** `-p` and `q` (excluding end-caps). |
+| `sympy_repr` | `str` | sympy standard representation of the polynomial. |
+| `generator_symbols` | `Tuple[str, …]` | The `sympy.Poly`'s generator — normally `('z', '1/z', 'E')`. |
+| `number_of_bands` | `int` | Number of bands $b$ (= highest exponent of `E` of the base term `-E**b`). |
+| `max_left_hopping` | `int` | The highest exponent of $z$, i.e. $q$ of the base term `z**q`. |
+| `max_right_hopping` | `int` | The lowest exponent of $z$, i.e. $p = D - q$ of the base term `z**(-p)`. |
+<!-- | `intermediate_z_degrees` | `Tuple[int, …]` | All non-zero $z$-exponents that lie **between** `-p` and `q` (excluding end-caps). |
 | `E_deg_assignments` | `Tuple[int, …]` | For each intermediate exponent, the power of `E`. |
-| `param_degree_placements` | `Tuple[int, …]` | Subset of `intermediate_z_degrees` that host *parameter symbols* instead of unit coefficients. |
+| `param_degree_placements` | `Tuple[int, …]` | Subset of `intermediate_z_degrees` that host *parameter symbols* instead of unit coefficients. | -->
 
 ---
 
@@ -219,29 +220,30 @@ max right hopping: 2
 ```
 $$\text{Poly}{\left( z^{2} + b z + \frac{1}{z^{2}} + a \frac{1}{z} - E, z, \frac{1}{z}, E, domain=\mathbb{Z}\left[a, b\right] \right)}$$
 
+
+### Node and Edge Attributes of the Hamiltonian Spectral Graph Object
 ---
 
-### Node and Edge Attributes of the Spectral Graph Object
-
-Each spectral graph is represented as a `networkx.MultiGraph` object.
+Each *Hamiltonian spectral graph* is represented as a `networkx.MultiGraph` object.
 
 #### Node Attributes
 
 | Attribute | Type              | Description |
 |-----------|-------------------|-------------|
-| `pos`     | `(2,) np.ndarray` | 2D position of the node in the complex energy plane, given as $(\text{Re}(E), \text{Im}(E))$. |
-| `dos`     | `float`           | Local **density of states** at the node, indicating the number of spectral roots in the vicinity. |
-| `potential` | `float`         | Local **spectral potential**, which can be interpreted as an energy-dependent quantity derived from the eigenstructure. |
+| `pos`     | `(2,) np.ndarray` | 2D position of the node in the complex energy plane $(\text{Re}(E), \text{Im}(E))$. |
+| `dos`     | `float`           | **Density of States** at the node, the number of eigenvalues per unit area. |
+| `potential` | `float`         | **Spectral Potential** at the node, i.e. Ronkin function, an algebro-geometric property of the characteristic polynomial.  |
 
 #### Edge Attributes
 
 | Attribute | Type                | Description |
 |-----------|---------------------|-------------|
-| `weight`  | `float`             | Length of the edge in the complex energy plane, i.e., the Euclidean distance between its endpoints. |
+| `weight`  | `float`             | Length of the edge in the complex energy plane. |
 | `pts`     | `(w, 2) np.ndarray` | Discretized points along the edge, forming a path in the complex plane. `w` is the number of samples along the edge. |
-| `avg_dos` | `float`             | Average density of states sampled along the edge trajectory. |
-| `avg_potential` | `float`       | Average spectral potential sampled along the edge trajectory. |
+| `avg_dos` | `float`             | Average density of states sampled along the edge. |
+| `avg_potential` | `float`       | Average spectral potential sampled along the edge. |
 
+---
 Take the $1234$-th graph in the `class_9.npz` file as an example:
 
 ```python
@@ -251,9 +253,9 @@ gid = 1234
 graph = nx_graphs[gid]
 
 print(f"a = {a_vals[gid]}, b = {b_vals[gid]}\n")
-print(f"    Nodes: {graph.nodes(data=True)}\n")
-print(f"    Edges: {graph.edges(data=True)}\n")
-print(f"    Class metadata: {class_meta}")
+print(f"Nodes: {graph.nodes(data=True)}\n")
+print(f"Edges: {graph.edges(data=True)}\n")
+print(f"Class metadata: {class_meta}")
 
 
 import matplotlib.pyplot as plt
@@ -304,13 +306,13 @@ for i in range(num_classes):
 
 ## Load `T-HSG-5.1M`
 
-Again, take the **9-th** class as an example, to obtain the temporal graphs derived from class 9:
+Again, take the **9-th** class as an example, to obtain the temporal graphs derived from class 9 (ensure the `class_9.npz` file is in the `gen.root_dir/raw` directory):
 
 ```python
 tg_9 = gen.get_temporal_graphs_by_class(class_idx=9)
 ```
 
-To get the whole `T-HSG-5.1M` as a `List[List[networkx.MultiGraph]]` (ensure all 1401 files are downloaded at `gen.root_dir/raw` or generated):
+To get the whole `T-HSG-5.1M` as a `List[List[networkx.MultiGraph]]` (ensure all 1401 files are downloaded or generated at `gen.root_dir/raw`):
 
 ```python
 thsg = []
