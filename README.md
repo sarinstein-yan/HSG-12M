@@ -33,73 +33,20 @@ $ pip install . --extra-index-url https://download.pytorch.org/whl/${CUDA}
 ```
 
 
-## Raw Data Files
-
-The download of raw data files is by `easyDataverse`, which sometimes encounters timeout connecting to Dataverse. Retry or connect to better network if you encounter timeout when initializing the dataset.
-
-```python
-from easyDataverse import Dataverse
-
-server_url = "https://dataverse.harvard.edu"
-dataset_pid = "doi:10.7910/DVN/PYDSSQ"
-
-dv = Dataverse(server_url)
-hsg = dv.load_dataset(
-    pid=dataset_pid, 
-    # local directory to save files
-    filedir='.',
-    # which classes to download
-    filenames=[f'raw/class_{i}.npz' for i in range(1401)],
-    # Set to True to download the files, requires at least 257GB of free space
-    download_files=False,
-)
-
-# metadata
-print(hsg.citation)
-```
-
-Take the **9-th** class as an example, if the `raw/class_9.npz` file is downloaded, one can load the `nx.MultiGraph` objects, class label `y`, the parameter values `a_vals`, `b_vals`, and the class-specific metadata as follows:
-
-```python
-import hsg
-
-nx_graphs, y, a_vals, b_vals, class_metas = hsg.load_class(class_idx=9, raw_dir='./dev/raw')
-
-print("class label:", y)
-print("a_vals:", a_vals)
-print("b_vals:", b_vals)
-print("polynomial latex:", class_metas['latex'])
-print("polynomial parameter symbols:", class_metas['parameter_symbols'])
-print("polynomial generators:", class_metas['generator_symbols'])
-print("number of bands:", class_metas['number_of_bands'])
-print("max left hopping:", class_metas['max_left_hopping'])
-print("max right hopping:", class_metas['max_right_hopping'])
-import sympy as sp
-poly = sp.sympify(class_metas['sympy_repr'])
-poly
-```
-<span style="color:#d73a49;font-weight:bold">>>></span>
-```text
-class label: 9
-a_vals: [-10.-5.j -10.-2.j -10.-1.j ...  10.+1.j  10.+2.j  10.+5.j]
-b_vals: [-10.-5.j -10.-5.j -10.-5.j ...  10.+5.j  10.+5.j  10.+5.j]
-polynomial latex: - E + \frac{a}{z} + b z + z^{2} + \frac{1}{z^{2}}
-polynomial parameter symbols: ['a' 'b']
-polynomial generators: ['z' '1/z' 'E']
-number of bands: 1
-max left hopping: 2
-max right hopping: 2
-```
-$$\text{Poly}{\left( z^{2} + b z + \frac{1}{z^{2}} + a \frac{1}{z} - E, z, \frac{1}{z}, E, domain=\mathbb{Z}\left[a, b\right] \right)}$$
-
-
 ## PyG Datasets
 
 The download of raw data files is by [`easyDataverse`](https://github.com/gdcc/easyDataverse), which sometimes encounters timeout connecting to `Dataverse`. Retry or connect to better network if you encounter timeout when initializing the dataset.
 
-The `NetworkX MultiGraph` dataset is processed to [`PyTorch Geometric`](https://pyg.org/) Dataset via the scheme discussed in the companion paper. 
+The `NetworkX MultiGraph` dataset is processed to [`PyTorch Geometric`](https://pyg.org/) Dataset via the scheme discussed in the companion paper.
 
 Feel free to overwrite the `process` method in `HSGOnDisk` or `HSGInMemory` to customize the featurization and processing.
+
+Available dataset variants (`subset`) are:
+- `one-band`: 24 classes, balanced
+- `two-band`: 275 classes, balanced
+- `three-band`: 1102 classes, balanced
+- `topology`: 1401 classes, imbalanced
+- `all` / `all-static`: 1401 classes, balanced
 
 ```python
 from hsg import HSGOnDisk, HSGInMemory
@@ -168,6 +115,8 @@ args = Namespace(
     models=['gcn', 'sage', 'gat', 'gin'],
     ...
 )
+
+import hsg
 hsg.run_experiment(args)
 ```
 
@@ -175,6 +124,154 @@ To view Tensorboard logs:
 ```bash
 $ tensorboard --logdir path/to/baseline_result
 ```
+
+## Raw Data Files
+
+The download of raw data files is by `easyDataverse`, which sometimes encounters timeout connecting to Dataverse. Retry or connect to better network if you encounter timeout when initializing the dataset.
+
+```python
+from easyDataverse import Dataverse
+
+server_url = "https://dataverse.harvard.edu"
+dataset_pid = "doi:10.7910/DVN/PYDSSQ"
+
+dv = Dataverse(server_url)
+hsg12m = dv.load_dataset(
+    pid=dataset_pid, 
+    # local directory to save files
+    filedir='.',
+    # which classes to download
+    filenames=[f'raw/class_{i}.npz' for i in range(1401)],
+    # Set to True to download the files, requires at least 257GB of free space
+    download_files=False,
+)
+
+# dataset metadata
+print(hsg12m.citation)
+```
+
+---
+
+### Content of each file
+Each partitioned `.npz` file stores spectral graph data generated from one **polynomial class**. These files are created by the `hsg.HSG_Generator.generate_dataset(...)` method and are named as: `class_{class_index}.npz`. (See [HSG-12M generation](#hsg-12m-generation) )
+
+| Key             | Type            | Meaning |
+|------------------|------------------|---------|
+| `graphs_pickle` | `List[bytes]`    | List of **serialized NetworkX MultiGraph objects**, each corresponding to a unique `(a, b)` parameter pair. |
+| `y`             | `int`            | Class label for the graphs in this partition. | 
+| `a_vals`        | `np.ndarray`     | List of parameter values for `a` used in this partition. |
+| `b_vals`        | `np.ndarray`     | List of parameter values for `b` used in this partition. |
+| `class_meta`    | `Dict[str, Any]` | Class-level metadata, including polynomial and Hamiltonian information. |
+
+**Note:** Except for `y` and `class_meta` which are class-level, the other three are **aligned by index**, i.e., the $i$-th graph in `graphs_pickle` was generated using `a = a_vals[i]` and `b = b_vals[i]`.
+
+---
+
+### Content of `class_meta`
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `parameter_symbols` | `Tuple[str, …]` | Names of the free coefficients inserted into the polynomial (e.g. `('a', 'b')`). |
+| `generator_symbols` | `Tuple[str, …]` | The SymPy generator ordering used inside `sp.Poly` — normally `('z', '1/z', 'E')`. |
+| `latex` | `str` | LaTeX code for the fully-expanded polynomial. |
+| `sympy_repr` | `str` | Result of `sp.srepr(poly)` – a machine-readable AST for exact reconstruction. |
+| `number_of_bands` | `int` | Number of bands $b$ (= highest exponent of `E` in the base term `-E**b`). |
+| `max_left_hopping` | `int` | Positive exponent $q$ in the base term `z**q`. |
+| `max_right_hopping` | `int` | Complementary exponent $p = D - q$ in the base term `z**(-p)`. |
+| `intermediate_z_degrees` | `Tuple[int, …]` | All non-zero $z$-exponents that lie **between** `-p` and `q` (excluding end-caps). |
+| `E_deg_assignments` | `Tuple[int, …]` | For each intermediate exponent, the power of `E`. |
+| `param_degree_placements` | `Tuple[int, …]` | Subset of `intermediate_z_degrees` that host *parameter symbols* instead of unit coefficients. |
+
+---
+
+Take the **9-th** class as an example, if the `raw/class_9.npz` file is downloaded, one can load the `nx.MultiGraph` objects, class label `y`, the parameter values `a_vals`, `b_vals`, and the class-specific metadata as follows:
+
+```python
+import hsg
+
+nx_graphs, y, a_vals, b_vals, class_meta = hsg.load_class(class_idx=9, raw_dir='./dev/raw')
+
+print("class label:", y)
+print("a_vals:", a_vals)
+print("b_vals:", b_vals)
+print("polynomial latex:", class_meta['latex'])
+print("polynomial parameter symbols:", class_meta['parameter_symbols'])
+print("polynomial generators:", class_meta['generator_symbols'])
+print("number of bands:", class_meta['number_of_bands'])
+print("max left hopping:", class_meta['max_left_hopping'])
+print("max right hopping:", class_meta['max_right_hopping'])
+
+import sympy as sp
+poly = sp.sympify(class_meta['sympy_repr'])
+poly
+```
+<span style="color:#d73a49;font-weight:bold">>>></span>
+```text
+class label: 9
+a_vals: [-10.-5.j -10.-2.j -10.-1.j ...  10.+1.j  10.+2.j  10.+5.j]
+b_vals: [-10.-5.j -10.-5.j -10.-5.j ...  10.+5.j  10.+5.j  10.+5.j]
+polynomial latex: - E + \frac{a}{z} + b z + z^{2} + \frac{1}{z^{2}}
+polynomial parameter symbols: ['a' 'b']
+polynomial generators: ['z' '1/z' 'E']
+number of bands: 1
+max left hopping: 2
+max right hopping: 2
+```
+$$\text{Poly}{\left( z^{2} + b z + \frac{1}{z^{2}} + a \frac{1}{z} - E, z, \frac{1}{z}, E, domain=\mathbb{Z}\left[a, b\right] \right)}$$
+
+---
+
+### Node and Edge Attributes of the Spectral Graph Object
+
+Each spectral graph is represented as a `networkx.MultiGraph` object.
+
+#### Node Attributes
+
+| Attribute | Type              | Description |
+|-----------|-------------------|-------------|
+| `pos`     | `(2,) np.ndarray` | 2D position of the node in the complex energy plane, given as $(\text{Re}(E), \text{Im}(E))$. |
+| `dos`     | `float`           | Local **density of states** at the node, indicating the number of spectral roots in the vicinity. |
+| `potential` | `float`         | Local **spectral potential**, which can be interpreted as an energy-dependent quantity derived from the eigenstructure. |
+
+#### Edge Attributes
+
+| Attribute | Type                | Description |
+|-----------|---------------------|-------------|
+| `weight`  | `float`             | Length of the edge in the complex energy plane, i.e., the Euclidean distance between its endpoints. |
+| `pts`     | `(w, 2) np.ndarray` | Discretized points along the edge, forming a path in the complex plane. `w` is the number of samples along the edge. |
+| `avg_dos` | `float`             | Average density of states sampled along the edge trajectory. |
+| `avg_potential` | `float`       | Average spectral potential sampled along the edge trajectory. |
+
+Take the $1234$-th graph in the `class_9.npz` file as an example:
+
+```python
+import networkx as nx
+
+gid = 1234
+graph = nx_graphs[gid]
+
+print(f"a = {a_vals[gid]}, b = {b_vals[gid]}\n")
+print(f"    Nodes: {graph.nodes(data=True)}\n")
+print(f"    Edges: {graph.edges(data=True)}\n")
+print(f"    Class metadata: {class_meta}")
+
+
+import matplotlib.pyplot as plt
+
+def plot_spatial_multigraph(graph, ax=None):
+    if ax is None:
+        fig, ax = plt.subplots()
+    for es, ee, pts in graph.edges(data='pts'):
+        ax.plot(*pts.T, c='tab:blue', lw=2, alpha=0.8)
+    for n, (x, y) in graph.nodes(data='pos'):
+        ax.scatter(x, y, c='tab:red', s=10, zorder=10)
+    return ax
+
+fig, ax = plt.subplots(figsize=(3, 3))
+plot_spatial_multigraph(graph, ax=ax)
+plt.tight_layout(); plt.show()
+```
+
 
 ## HSG-12M Generation
 
@@ -192,7 +289,7 @@ gen = hsg.HSG_Generator(
 num_classes = len(gen.all_metas)
 ```
 
-Run the following to generate the 1401 raw data files of HSG-12M:
+Run the following to generate the 1401 raw data files of HSG-12M (saved to `HSG_Generator.root_dir + '/raw'`):
 
 ```python
 for i in range(num_classes):
@@ -213,7 +310,7 @@ Again, take the **9-th** class as an example, to obtain the temporal graphs deri
 tg_9 = gen.get_temporal_graphs_by_class(class_idx=9)
 ```
 
-To get the whole `T-HSG-5.1M` as a `List[List[networkx.MultiGraph]]`:
+To get the whole `T-HSG-5.1M` as a `List[List[networkx.MultiGraph]]` (ensure all 1401 files are downloaded at `gen.root_dir/raw` or generated):
 
 ```python
 thsg = []
