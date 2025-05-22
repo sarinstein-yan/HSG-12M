@@ -104,7 +104,7 @@ Feel free to overwrite the `process` method in `HSGOnDisk` or `HSGInMemory` to c
 ```python
 from hsg import HSGOnDisk, HSGInMemory
 
-# # use HSGOnDisk if some large dataset variant overflows RAM
+# # use HSGOnDisk for large dataset variants that may overflow RAM
 # ds = HSGOnDisk(root="./dev", subset="one-band")
 
 ds = HSGInMemory(root="./dev", subset="one-band")
@@ -113,7 +113,7 @@ print("Number of graphs:", len(ds))
 print("Number of classes:", ds.num_classes)
 print("Number of node features:", ds.num_features)
 print("Number of edge features:", ds.num_edge_features)
-print("First graph:", ds[12345])
+print("A graph:", ds[12345])
 ```
 <span style="color:#d73a49;font-weight:bold">>>></span>
 ```text
@@ -121,7 +121,7 @@ Number of graphs: 198744
 Number of classes: 24
 Number of node features: 4
 Number of edge features: 13
-First graph: Data(edge_index=[2, 6], x=[4, 4], edge_attr=[6, 13], y=[1])
+A graph: Data(edge_index=[2, 6], x=[4, 4], edge_attr=[6, 13], y=[1])
 ```
 
 
@@ -157,7 +157,7 @@ $ python -m src/hsg/training.py \
     --early_stop_patience 10
 ```
 
-To run interactively, use `hsg.run_experiment(args: argparse.Namespace)` (source in `src/hsg/training.py`) to run the experiment interactively (in IPython or Jupyter Notebook):
+To run interactively, use `hsg.run_experiment(args: argparse.Namespace)` (source code in `src/hsg/training.py`) to run the experiment interactively (in IPython or Jupyter Notebook):
 
 ```python
 from argparse import Namespace
