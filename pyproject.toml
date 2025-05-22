@@ -14,9 +14,13 @@ maintainers  = [
     {name = "Xianquan (Sarinstein) Yan", email = "xianquanyan@gmail.com"},
 ]
 keywords = [
-    "non-hermitian spectral graph", "non-bloch band", "algebraic geometry", 
-    "graph representation learning", "transformer", "computer vision", 
-    "morphological image processing"
+    "non-hermitian spectral graph", 
+    "non-bloch band", 
+    "algebraic geometry", 
+    "graph representation learning", 
+    "transformer", 
+    "computer vision", 
+    "morphological image processing",
 ]
 readme = {"file" = "README.md", "content-type" = "text/markdown"}
 license = {file = "LICENSE"}
@@ -32,18 +36,20 @@ classifiers = [
     "Environment :: GPU :: NVIDIA CUDA"
 ]
 dependencies = [
-    "poly2graph",
-    "pandas",
-    'tqdm',
-    "easyDataverse",
+    "torch>=2.5",
+    "lightning",
+    "torch_geometric",
     "tensorboard",
+    "pandas",
+    "tqdm",
+    "easyDataverse",
+    "poly2graph",
 ]
 
 [project.optional-dependencies]
-benchmark = [
-    "lightning",
-    "torch_geometric",
-    # "tensorflow",
+dev = [
+    "tensorflow",
+    "jupyterlab",
 ]
 
 [project.urls]
