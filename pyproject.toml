@@ -60,7 +60,11 @@ Repository = "https://github.com/sarinstein-yan/HSG-12M"
 path = "src/hsg/__init__.py"
 
 [tool.hatch.build.targets.sdist]
-exclude = ["assets"]
+exclude = [
+  "assets",
+  "*.ipynb",     # any notebook in project root
+  "**/*.ipynb",  # any notebook in sub-dirs
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hsg"]
