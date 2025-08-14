@@ -405,7 +405,8 @@ def main():
 
     # sanity: if user passes "all", restore full list
     if args.models == ["all"]:
-        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine", "cgcnn", "spline", "monet"]
+        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine", 
+                       "cgcnn", "ecc", "monet", "spline"]
 
     print(f"Loading PolyGraph dataset from {args.root}, subset {args.subset}, "
             f"batch size {args.batch_size}, models {args.models}, seeds {args.seeds}")
@@ -430,13 +431,11 @@ def main():
         if model_name in {"spline", "monet"}:
             base_dataset.transform = T.Cartesian(cat=False)
             print("Applied transforms.Cartesian(cat=False) for spline/monet.")
-        else:
-            base_dataset.transform = None
 
         # Detect edge_dim for models that require it:
         probe = dm.datasets[0][0][0]
         args.edge_dim = int(probe.edge_attr.size(-1)) if getattr(probe, "edge_attr", None) is not None else None
-        if model_name in {"cgcnn", "spline", "monet"}:
+        if model_name in {"cgcnn", "spline", "monet", "ecc"}:
             print(f"Detected edge_dim={args.edge_dim} for {model_name}.")
 
 

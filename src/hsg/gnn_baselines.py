@@ -18,6 +18,7 @@ from torch_geometric.nn.conv import (
     GCNConv,
     GINConv,
     GINEConv,
+    NNConv,
     SplineConv,
     GMMConv,
     CGConv,
@@ -44,6 +45,7 @@ __all__ = [
     'GAT',
     'PNA',
     'EdgeCNN',
+    'ECC',
     'SplineCNN',
     'MoNet',
     'CGCNN',
@@ -737,6 +739,34 @@ class EdgeCNN(BasicGNN):
 
 
 # --- spatial graph baselines ---
+class ECC(BasicGNN):
+    r"""NNConv using :class:`torch_geometric.nn.conv.NNConv`.
+    Required kwargs:
+        - edge_dim (int): dimensionality of edge_attr
+    Optional kwargs:
+        - edge_mlp_hidden (int, default=64): hidden size of the edge network
+        - aggr (str, default='mean'): aggregation ('add', 'mean', 'max')
+    """
+    supports_edge_weight: Final[bool] = False
+    supports_edge_attr: Final[bool] = True
+    supports_norm_batch: Final[bool]
+
+    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
+        edge_dim = kwargs.get('edge_dim', None)
+        if edge_dim is None:
+            raise ValueError("NNConv requires 'edge_dim'. Provide via get_model_instance(..., edge_dim=...).")
+        dim = in_channels * out_channels
+        nn = MLP(
+            [edge_dim, dim, dim],
+            act=self.act,
+            act_first=self.act_first,
+            norm=self.norm,
+            norm_kwargs=self.norm_kwargs,
+        )
+        return NNConv(in_channels, out_channels, nn=nn,
+                      aggr=kwargs.get('aggr', 'add'))
+
+
 class SplineCNN(BasicGNN):
     r"""SplineCNN using :class:`torch_geometric.nn.conv.SplineConv`.
     Required kwargs:
@@ -892,6 +922,10 @@ def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
     elif model_name == 'cgcnn':
         # Requires: edge_dim. Auto-projects input to hidden if needed.
         model = CGCNN(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+    elif model_name == 'ecc':
+        model = GNNBaselines(ECC,
+            dim_in, dim_h_gnn, dim_h_mlp, dim_out,
             num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
     elif model_name == 'spline':
         # Requires: edge_dim, kernel_size (and optionally degree)
