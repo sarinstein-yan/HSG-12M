@@ -4,11 +4,19 @@ Benchmark script for HSG-12M GNN baselines.
 Usage
 -----
 ```bash
-python src/hsg/training.py  \
-    --root /path/to/HSG-12M \
-    --subset one-band --epochs 100 \
+python src/hsg/training.py  \\
+    --root /path/to/HSG-12M \\
+    --subset one-band --epochs 100 \\
     ...
 ```
+Notes
+-----
+- New spatial baselines: `cgcnn`, `spline`, and `monet` require an explicit
+  `edge_dim` derived from `data.edge_attr.size(-1)`.
+- For `spline` and `monet`, we *automatically* apply
+  `torch_geometric.transforms.Cartesian(cat=False)` to the dataset during
+  their runs so that `edge_attr` becomes pseudo-coordinates and `edge_dim`
+  matches that pseudo-dimension.
 """
 
 __all__ = [
@@ -28,6 +36,7 @@ from typing import List, Dict
 import torch
 from torch.utils.data import Subset
 from torch_geometric.loader import DataLoader
+from torch_geometric import transforms as T
 
 from sklearn.model_selection import StratifiedShuffleSplit, ShuffleSplit
 
@@ -109,16 +118,34 @@ class LitGNN(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(dict(vars(hparams)))
 
+        # --- Prepare extra kwargs for spatial baselines that need edge_dim ---
+        extra_kwargs = {}
+        needs_edge_dim = self.hparams.model in {"cgcnn", "spline", "monet"}
+        edge_dim = getattr(self.hparams, "edge_dim", None)
+        if needs_edge_dim and edge_dim is not None:
+            extra_kwargs["edge_dim"] = int(edge_dim)
+
+        # Optional hyper-params for spline/monet (kept optional; rely on model defaults otherwise)
+        if self.hparams.model in {"spline", "monet"}:
+            ek = getattr(self.hparams, "edge_kernel", 0)
+            if isinstance(ek, int) and ek > 0:
+                extra_kwargs["kernel_size"] = ek
+            if self.hparams.model == "spline":
+                deg = getattr(self.hparams, "spline_degree", None)
+                if isinstance(deg, int) and deg > 0:
+                    extra_kwargs["degree"] = deg
+
         self.model = get_model_instance(
-            hparams.model,
+            self.hparams.model,
             dim_in=in_dim,
-            dim_h_gnn=hparams.dim_gnn,
-            dim_h_mlp=hparams.dim_mlp,
+            dim_h_gnn=self.hparams.dim_gnn,
+            dim_h_mlp=self.hparams.dim_mlp,
             dim_out=num_classes,
-            num_layers_gnn=hparams.layers_gnn,
-            num_layers_mlp=hparams.layers_mlp,
-            dropout=hparams.dropout,
-            num_heads=hparams.heads,
+            num_layers_gnn=self.hparams.layers_gnn,
+            num_layers_mlp=self.hparams.layers_mlp,
+            dropout=self.hparams.dropout,
+            num_heads=self.hparams.heads,
+            **extra_kwargs,
         )
 
         self.criterion = torch.nn.CrossEntropyLoss()
@@ -247,7 +274,7 @@ def run_experiment(args: Namespace):
     save_path.mkdir(parents=True, exist_ok=True)
 
     if args.models == ["all"]:
-        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine"]
+        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine", "cgcnn", "spline", "monet"]
 
     print(f"⏳  Loading PolyGraph from {args.root}, subset={args.subset}, "
           f"batch={args.batch_size}, models={args.models}, seeds={args.seeds}")
@@ -261,11 +288,25 @@ def run_experiment(args: Namespace):
     )
     dm.prepare_data(); dm.setup()
 
+    # Helper to access the underlying base dataset (shared across seeds):
+    base_dataset = dm.datasets[0][0].dataset  # Subset(...).dataset
+
     # ---------- loop over architectures ----------
     for model_name in args.models:
         print(f"\n🧠  ▶ Training {model_name} …")
         args.model = model_name            # inject so LitGNN can see it
         summaries = []
+
+        # Apply/clear Cartesian pseudo-coordinates for models that need them:
+        if model_name in {"spline", "monet"}:
+            base_dataset.transform = T.Cartesian(cat=False)
+            print("   • Applied transforms.Cartesian(cat=False) for pseudo-coordinates.")
+
+        # Detect edge_dim once (same across splits):
+        probe = dm.datasets[0][0][0]
+        args.edge_dim = int(probe.edge_attr.size(-1)) if getattr(probe, "edge_attr", None) is not None else None
+        if model_name in {"cgcnn", "spline", "monet"}:
+            print(f"   • Detected edge_dim={args.edge_dim} for {model_name}.")
 
         for seed_idx, seed in enumerate(args.seeds):
             pl.seed_everything(seed, workers=True)
@@ -315,6 +356,9 @@ def run_experiment(args: Namespace):
             metrics = {k: float(v) for k, v in trainer.callback_metrics.items()}
             summaries.append({"seed": seed, **metrics})
 
+        # Reset transform to avoid leaking into subsequent runs:
+        base_dataset.transform = None
+
         # ---------- write per-seed + summary CSV ----------
         df_path = save_path / f"{model_name}.csv"
         pd.DataFrame(summaries).to_csv(df_path, index=False)
@@ -329,7 +373,7 @@ def main():
     parser.add_argument("--root", type=Path, default=Path("/mnt/ssd/nhsg12m"))
     parser.add_argument("--save_dir", type=Path, default=Path("/mnt/ssd/baseline_result"))
     parser.add_argument("--subset", default="one-band")
-    parser.add_argument("--models", nargs="*", default=["gcn", "sage", "gat", "gatv2", "gin", "gine"],
+    parser.add_argument("--models", nargs="*", default=["all"],
                         help="Architectures to run; omit for all.")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=256)
@@ -346,6 +390,13 @@ def main():
     parser.add_argument("--seeds", nargs="*", type=int, default=[42, 624, 706])
     parser.add_argument("--log_every_n_steps", type=int, default=1)
     parser.add_argument("--early_stop_patience", type=int, default=10)
+
+    # NEW (optional): spatial conv hyper-params; used only for spline/monet if provided
+    parser.add_argument("--edge_kernel", type=int, default=0,
+                        help="Kernel size for spline/monet. If 0, use model defaults (5 for spline, 25 for MoNet)." )
+    parser.add_argument("--spline_degree", type=int, default=1,
+                        help="Spline polynomial degree. Only used by --models spline when >0.")
+
     args = parser.parse_args()
 
     # sanity: check save_dir exists
@@ -354,7 +405,7 @@ def main():
 
     # sanity: if user passes "all", restore full list
     if args.models == ["all"]:
-        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine"]
+        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine", "cgcnn", "spline", "monet"]
 
     print(f"Loading PolyGraph dataset from {args.root}, subset {args.subset}, "
             f"batch size {args.batch_size}, models {args.models}, seeds {args.seeds}")
@@ -367,10 +418,28 @@ def main():
     )
     dm.prepare_data(); dm.setup()
 
+    # Access base dataset once to control transform per model:
+    base_dataset = dm.datasets[0][0].dataset
+
     # loop over architectures
     for model_name in args.models:
         args.model = model_name  # inject into hparams for LightningModule
         summaries: List[Dict[str, float]] = []
+
+        # Apply Cartesian pseudo-coordinates for spline/monet; clear otherwise:
+        if model_name in {"spline", "monet"}:
+            base_dataset.transform = T.Cartesian(cat=False)
+            print("Applied transforms.Cartesian(cat=False) for spline/monet.")
+        else:
+            base_dataset.transform = None
+
+        # Detect edge_dim for models that require it:
+        probe = dm.datasets[0][0][0]
+        args.edge_dim = int(probe.edge_attr.size(-1)) if getattr(probe, "edge_attr", None) is not None else None
+        if model_name in {"cgcnn", "spline", "monet"}:
+            print(f"Detected edge_dim={args.edge_dim} for {model_name}.")
+
+
         for seed_idx, seed in enumerate(args.seeds):
             pl.seed_everything(seed, workers=True)
 
@@ -408,6 +477,9 @@ def main():
                 "seed": seed,
                 **{k: float(metrics[k]) for k in metrics}
             })
+
+        # Reset transform before proceeding to next model (avoid leakage):
+        base_dataset.transform = None
 
         # dump per‑seed + summary CSV
         out_csv = os.path.join(save_path, f"{model_name}.csv")

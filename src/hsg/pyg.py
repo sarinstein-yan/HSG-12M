@@ -134,6 +134,7 @@ class HSGOnDisk(OnDiskDataset):
             pot = np.float32(nd.pop("potential", 0.0))
             dos = np.float32(nd.pop("dos", 0.0))
             nd["x"] = np.array([*pos, pot, dos], dtype=np.float32)
+            nd["pos"] = pos
             node_pos[nid], node_pot[nid], node_dos[nid] = pos, pot, dos
 
         for u, v, ed in g.edges(data=True):
