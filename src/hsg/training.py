@@ -120,7 +120,7 @@ class LitGNN(pl.LightningModule):
 
         # --- Prepare extra kwargs for spatial baselines that need edge_dim ---
         extra_kwargs = {}
-        needs_edge_dim = self.hparams.model in {"cgcnn", "spline", "monet"}
+        needs_edge_dim = self.hparams.model in {"cgcnn", "spline", "monet", "ecc"}
         edge_dim = getattr(self.hparams, "edge_dim", None)
         if needs_edge_dim and edge_dim is not None:
             extra_kwargs["edge_dim"] = int(edge_dim)
@@ -274,7 +274,8 @@ def run_experiment(args: Namespace):
     save_path.mkdir(parents=True, exist_ok=True)
 
     if args.models == ["all"]:
-        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine", "cgcnn", "spline", "monet"]
+        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine", 
+                       "cgcnn", "ecc", "spline", "monet"]
 
     print(f"⏳  Loading PolyGraph from {args.root}, subset={args.subset}, "
           f"batch={args.batch_size}, models={args.models}, seeds={args.seeds}")
@@ -305,7 +306,7 @@ def run_experiment(args: Namespace):
         # Detect edge_dim once (same across splits):
         probe = dm.datasets[0][0][0]
         args.edge_dim = int(probe.edge_attr.size(-1)) if getattr(probe, "edge_attr", None) is not None else None
-        if model_name in {"cgcnn", "spline", "monet"}:
+        if model_name in {"cgcnn", "ecc", "spline", "monet"}:
             print(f"   • Detected edge_dim={args.edge_dim} for {model_name}.")
 
         for seed_idx, seed in enumerate(args.seeds):
@@ -391,7 +392,7 @@ def main():
     parser.add_argument("--log_every_n_steps", type=int, default=1)
     parser.add_argument("--early_stop_patience", type=int, default=10)
 
-    # NEW (optional): spatial conv hyper-params; used only for spline/monet if provided
+    # spatial conv hyper-params; used only for spline/monet if provided
     parser.add_argument("--edge_kernel", type=int, default=0,
                         help="Kernel size for spline/monet. If 0, use model defaults (5 for spline, 25 for MoNet)." )
     parser.add_argument("--spline_degree", type=int, default=1,

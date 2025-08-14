@@ -779,8 +779,8 @@ class SplineCNN(BasicGNN):
     supports_edge_attr: Final[bool] = True
     supports_norm_batch: Final[bool]
 
-    def init_conv(self, in_channels: int, out_channels: int, 
-                  edge_dim: int, **kwargs) -> MessagePassing:
+    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
+        edge_dim = kwargs.get('edge_dim', None)
         if edge_dim is None:
             raise ValueError("SplineCNN requires 'edge_dim'. "
                              "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K, degree=D).")
