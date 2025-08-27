@@ -17,15 +17,15 @@ def _select_class_ids(subset: str, metas: np.ndarray) -> np.ndarray:
     bands = np.array([m["number_of_bands"] for m in metas])
     match subset:
         case "one-band" | None:
-            return np.where(bands == 1)[0]
+            return np.where(bands == 1)[0].tolist()
         case "two-band":
-            return np.where(bands == 2)[0]
+            return np.where(bands == 2)[0].tolist()
         case "three-band":
-            return np.where(bands == 3)[0]
+            return np.where(bands == 3)[0].tolist()
         case "all":
-            return np.arange(len(metas))
+            return np.arange(len(metas)).tolist()
         case "topology":
-            return np.arange(len(metas))
+            return np.arange(len(metas)).tolist()
         case _:
             raise ValueError(f"Unknown subset: {subset}. Expected one of: "\
                              "'one-band', 'two-band', 'three-band', 'all', 'topology'")
@@ -121,36 +121,40 @@ class HSGOnDisk(OnDiskDataset):
             download_files=True,
         )
 
-    # Graph attribute stripping
+    # Graph attributes
     @staticmethod
     def _process_edge_pts(graph: nx.MultiGraph) -> nx.MultiGraph:
         """Return a *new* graph with compact node / edge attributes."""
         g = graph.copy()
-        _IDX = np.arange(1, 6)
+        # _IDX = np.arange(1, 6)
 
         node_pos, node_pot, node_dos = {}, {}, {}
         for nid, nd in g.nodes(data=True):
             pos = np.asarray(nd.pop("pos"), dtype=np.float32).reshape(-1)
             pot = np.float32(nd.pop("potential", 0.0))
             dos = np.float32(nd.pop("dos", 0.0))
-            nd["x"] = np.array([*pos, pot, dos], dtype=np.float32)
             nd["pos"] = pos
+            nd["x"] = np.array([*pos, pot, dos], dtype=np.float32)
             node_pos[nid], node_pot[nid], node_dos[nid] = pos, pot, dos
 
         for u, v, ed in g.edges(data=True):
             w = np.float32(ed.pop("weight"))
+            pu, pv = node_pos[u], node_pos[v]
+            displacement = np.float32(np.linalg.norm(pv - pu))
+            # sinuosity = w / displacement if displacement > 1e-6 else 1.0
             if "pts" in ed:
                 pts = ed.pop("pts")
-                idx = np.round(_IDX * (len(pts) - 1) / 6).astype(int)
-                pts5 = pts[idx].astype(np.float32).reshape(-1)
+                # idx = np.round(_IDX * (len(pts) - 1) / 6).astype(int)
+                # pts5 = pts[idx].astype(np.float32).reshape(-1)
+                mid = pts[len(pts) // 2].astype(np.float32)
                 avg_pot = np.float32(ed.pop("avg_potential", 0.5 * (node_pot[u] + node_pot[v])))
                 avg_dos = np.float32(ed.pop("avg_dos", 0.5 * (node_dos[u] + node_dos[v])))
             else:
-                mid = 0.5 * (node_pos[u] + node_pos[v])
-                pts5 = np.tile(mid, 5).astype(np.float32)
+                mid = 0.5 * (pu + pv)
+                # pts5 = np.tile(mid, 5).astype(np.float32)
                 avg_pot = np.float32(0.5 * (node_pot[u] + node_pot[v]))
                 avg_dos = np.float32(0.5 * (node_dos[u] + node_dos[v]))
-            ed["edge_attr"] = np.concatenate(([w, avg_pot, avg_dos], pts5), dtype=np.float32)
+            ed["edge_attr"] = np.concatenate(([w, displacement], mid, [avg_pot, avg_dos]), dtype=np.float32)
         return g
 
     @classmethod
@@ -166,8 +170,7 @@ class HSGOnDisk(OnDiskDataset):
     def process(self) -> None:  # type: ignore[override]
         """Convert raw *.npz* files → on-disk DB (dense labels)."""
         # dense label map *for this subset*
-        class_ids = self.required_classes
-        label_map = {int(old): new for new, old in enumerate(sorted(map(int, class_ids)))}
+        label_map = {int(old): new for new, old in enumerate(sorted(self.required_classes))}
         self._set_label_map(label_map)
 
         # optional topology masks
@@ -194,7 +197,7 @@ class HSGOnDisk(OnDiskDataset):
                 g for idx, g in enumerate(nx_graphs) if allowed is None or idx in allowed
             )
 
-            data_list: List[Data] = worker(
+            data_list: List[Data] = threader(
                 delayed(self._graph_to_data)(g, cid) for g in selected
             )
             if self.pre_filter is not None:

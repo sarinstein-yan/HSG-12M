@@ -919,10 +919,6 @@ def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
         model = GNNBaselines(GINE, 
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
             num_layers_gnn, num_layers_mlp, dropout=dropout)
-    elif model_name == 'cgcnn':
-        # Requires: edge_dim. Auto-projects input to hidden if needed.
-        model = CGCNN(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
-            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
     elif model_name == 'ecc':
         model = GNNBaselines(ECC,
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
@@ -936,6 +932,10 @@ def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
         # Requires: edge_dim, kernel_size (and optionally separate_gaussians)
         model = GNNBaselines(MoNet,
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+    elif model_name == 'cgcnn':
+        # Requires: edge_dim. Auto-projects input to hidden if needed.
+        model = CGCNN(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
             num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
     else:
         raise ValueError(f"Unknown model: {model_name}")
