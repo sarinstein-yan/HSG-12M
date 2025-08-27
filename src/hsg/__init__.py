@@ -2,6 +2,7 @@ __version__ = "0.0.1"
 __all__ = [
     "HSG_Generator", "load_class", "get_topology_mask",
     "GCN", "GraphSAGE", "GIN", "GINE", "GAT", "PNA", "EdgeCNN",
+    "CGCNN", "SplineCNN", "Monet", 
     "BasicGNN", "GNNBaselines", "get_model_instance",
     "HSGOnDisk", "HSGInMemory",
     "HSGLitDataModule", "LitGNN",
@@ -13,18 +14,7 @@ from hsg.generation import (
     load_class,
     get_topology_mask,
 )
-from hsg.gnn_baselines import (
-    GCN,
-    GraphSAGE,
-    GIN,
-    GINE,
-    GAT,
-    PNA,
-    EdgeCNN,
-    BasicGNN,
-    GNNBaselines,
-    get_model_instance,
-)
+from hsg.gnn_baselines import *
 from hsg.pyg import (
     HSGOnDisk,
     HSGInMemory,
