@@ -27,7 +27,7 @@ from torch_geometric.nn.conv import (
     SAGEConv,
 )
 from torch_geometric.nn import global_add_pool, global_mean_pool
-from torch_geometric.nn.models import MLP
+from torch_geometric.nn.models import MLP, NeuralFingerprint
 from torch_geometric.nn.models.jumping_knowledge import JumpingKnowledge
 from torch_geometric.nn.resolver import (
     activation_resolver,
@@ -786,7 +786,7 @@ class SplineCNN(BasicGNN):
                              "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K, degree=D).")
         return SplineConv(in_channels, out_channels,
                           dim=edge_dim, 
-                          kernel_size=kwargs.get('kernel_size', 5), 
+                          kernel_size=kwargs.get('kernel_size', 2), 
                           degree=kwargs.get('degree', 1),
                           aggr=kwargs.get('aggr', 'mean'))
 
@@ -810,7 +810,7 @@ class MoNet(BasicGNN):
                              "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K).")
         return GMMConv(in_channels, out_channels,
                        dim=edge_dim, 
-                       kernel_size=kwargs.get('kernel_size', 25),
+                       kernel_size=kwargs.get('kernel_size', 5),
                        separate_gaussians=kwargs.get('separate_gaussians', False),
                        aggr=kwargs.get('aggr', 'mean'))
 
@@ -859,6 +859,27 @@ class CGCNN(torch.nn.Module):
         if self._needs_proj: x = self.input_proj(x)
         h = self.conv(x=x, edge_index=edge_index, edge_attr=edge_attr)
         h = global_add_pool(h, batch)
+        x = self.mlp(h)
+        return x
+
+
+class MF(torch.nn.Module):
+    def __init__(self, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+                num_layers_gnn, num_layers_mlp, dropout=0.,
+                **kwargs):
+        super().__init__()
+        self.mf = NeuralFingerprint(
+                        in_channels=dim_in, hidden_channels=dim_h_gnn,
+                        num_layers=num_layers_gnn, out_channels=dim_h_gnn, 
+                        **kwargs)
+            
+        self.mlp = MLP(
+            in_channels=dim_h_gnn, hidden_channels=dim_h_mlp,
+            out_channels=dim_out, num_layers=num_layers_mlp, dropout=dropout)
+        
+    def forward(self, batch):
+        x, edge_index, batch = batch.x, batch.edge_index, batch.batch
+        h = self.mf(x=x, edge_index=edge_index, batch=batch)
         x = self.mlp(h)
         return x
 
@@ -936,6 +957,9 @@ def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
     elif model_name == 'cgcnn':
         # Requires: edge_dim. Auto-projects input to hidden if needed.
         model = CGCNN(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+    elif model_name == 'mf':
+        model = MF(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
             num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
     else:
         raise ValueError(f"Unknown model: {model_name}")

@@ -1,6 +1,6 @@
 import os.path as osp
 import pickle
-import time
+import logging
 from pathlib import Path
 import numpy as np
 import networkx as nx
@@ -65,6 +65,10 @@ class HSGOnDisk(OnDiskDataset):
         param = np.load(self.meta_dir / "HSG-generator-meta.npz", allow_pickle=True)
         metas = param["metas"]
         self.required_classes = _select_class_ids(self.subset, metas)
+        # exclude ill-class
+        if 1224 in self.required_classes:
+            logging.info("[HSG] excluding ill-class 1224")
+            self.required_classes.remove(1224)
 
         self.server_url = "https://dataverse.harvard.edu"
         self.dataset_pid = "doi:10.7910/DVN/PYDSSQ"
@@ -176,7 +180,7 @@ class HSGOnDisk(OnDiskDataset):
         # optional topology masks
         topo_masks: Optional[Sequence[Sequence[int]]] = None
         if self.subset == "topology":
-            topo_masks = pickle.load(open(self.root / "HSG-topology-mask.pkl", "rb"))
+            topo_masks = pickle.load(open(self.meta_dir / "HSG-topology-mask.pkl", "rb"))
 
         # make sure DB exists before parallel inserts
         _ = self.db
@@ -237,6 +241,8 @@ class HSGInMemory(InMemoryDataset):
             pre_transform=pre_transform,
             pre_filter=pre_filter,
         )
+        for attr in ["required_classes", "server_url", "dataset_pid", "_label_map"]:
+            setattr(self, attr, None)
         # pull the cached, collated tensors into memory
         self.load(self.processed_paths[0])
 
@@ -275,6 +281,9 @@ class HSGInMemory(InMemoryDataset):
 
         # cache num‑classes for quick access
         self._num_classes = on_disk.num_classes
+        # copy attributes from on_disk
+        for attr in ["required_classes", "server_url", "dataset_pid", "_label_map"]:
+            setattr(self, attr, getattr(on_disk, attr))
 
     # Convenience
     @property
