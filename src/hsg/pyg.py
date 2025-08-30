@@ -1,6 +1,5 @@
 import os.path as osp
 import pickle
-import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Iterable
 import numpy as np
@@ -19,7 +18,6 @@ from easyDataverse import Dataverse
 
 _GH_META = "https://raw.githubusercontent.com/sarinstein-yan/HSG-12M/main/assets"
 _META_FILES = ["HSG-generator-meta.npz", "HSG-topology-mask.pkl"]
-_ILL_CLASS = 1224  # exclude this one
 
 def _normalize_subset(subset: Optional[str]) -> str:
     s = (subset or "one-band").lower()
@@ -46,9 +44,6 @@ def _select_class_ids(subset: str, metas: np.ndarray) -> List[int]:
     else:
         raise ValueError(f"Unknown subset: {subset}. Expected one of: "
                          "'one-band', 'two-band', 'three-band', 'all', 'topology'")
-    if _ILL_CLASS in ids:
-        logging.info("[HSG] excluding ill-class 1224")
-        ids.remove(_ILL_CLASS)
     return ids
 
 def _load_required(meta_dir: Path, subset: str) -> tuple[list[int], dict[int, int]]:
