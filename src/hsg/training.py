@@ -4,11 +4,19 @@ Benchmark script for HSG-12M GNN baselines.
 Usage
 -----
 ```bash
-python src/hsg/training.py  \
-    --root /path/to/HSG-12M \
-    --subset one-band --epochs 100 \
+python src/hsg/training.py  \\
+    --root /path/to/HSG-12M \\
+    --subset one-band --epochs 100 \\
     ...
 ```
+Notes
+-----
+- New spatial baselines: `cgcnn`, `spline`, and `monet` require an explicit
+  `edge_dim` derived from `data.edge_attr.size(-1)`.
+- For `spline` and `monet`, we *automatically* apply
+  `torch_geometric.transforms.Cartesian(cat=False)` to the dataset during
+  their runs so that `edge_attr` becomes pseudo-coordinates and `edge_dim`
+  matches that pseudo-dimension.
 """
 
 __all__ = [
@@ -22,12 +30,14 @@ import os, time
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from argparse import ArgumentParser
-from typing import List, Dict
+from argparse import ArgumentParser, Namespace
+from types import SimpleNamespace
+from typing import List, Sequence, Tuple
 
 import torch
 from torch.utils.data import Subset
 from torch_geometric.loader import DataLoader
+from torch_geometric import transforms as T
 
 from sklearn.model_selection import StratifiedShuffleSplit, ShuffleSplit
 
@@ -37,69 +47,148 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torchmetrics import Accuracy, F1Score, AUROC, AveragePrecision
 
 from hsg.pyg import HSGInMemory
+from hsg.sampler import StaticBatchSampler
 from hsg.gnn_baselines import get_model_instance
 
 # ---------------------------------------------------------------------------
 # DataModule
 # ---------------------------------------------------------------------------
 class HSGLitDataModule(pl.LightningDataModule):
-    def __init__(self, root, subset, batch_size, seeds):
+    def __init__(
+        self,
+        root,
+        subset,
+        *,
+        max_num: int,
+        mode: str = "edge",
+        seeds: Sequence[int] = (0,),
+        skip_too_big: bool = True,
+        drop_last: bool = False,
+        pack_strategy: str = "sequential",  # or "sorted_desc"
+        shuffle_batch_order: bool = False,  # shuffle batch *order* each epoch
+        num_workers: int = 0,
+        pin_memory: bool = True,
+        persistent_workers: bool = False,
+    ):
         super().__init__()
+        if mode not in ("node", "edge"):
+            raise ValueError("mode must be 'node' or 'edge'")
         self.root, self.subset = root, subset
-        self.batch_size = batch_size
-        self.seeds = seeds
+        self.max_num = int(max_num)
+        self.mode = mode
+        self.seeds = list(seeds)
+        self.skip_too_big = bool(skip_too_big)
+        self.drop_last = bool(drop_last)
+        self.pack_strategy = pack_strategy
+        self.shuffle_batch_order = bool(shuffle_batch_order)
+
+        self.num_workers = int(num_workers)
+        self.pin_memory = bool(pin_memory)
+        self.persistent_workers = bool(persistent_workers) and (self.num_workers > 0)
+
+        self.datasets: List[Tuple[Subset, Subset, Subset]] = []
+        self.sizes_triplets: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
 
     def prepare_data(self):
-        # trigger initial download / processing
+        # Trigger initial download/processing (executed on rank 0 only)
         _ = HSGInMemory(self.root, self.subset)
 
     def setup(self, stage=None):
-        self.datasets = []
+        # Setup (executed on all ranks)
+        self.datasets.clear()
+        self.sizes_triplets.clear()
+
         full = HSGInMemory(self.root, self.subset)
         y_all = full.y.numpy()
+        size_key = "n_nodes" if self.mode == "node" else "n_edges"
+        if not hasattr(full, size_key):
+             raise RuntimeError(f"Dataset missing size attribute: {size_key}")
+             
+        size_array = np.asarray(
+            getattr(full, size_key),
+            dtype=np.int64,
+        )
+        if len(size_array) != len(full):
+            raise RuntimeError("Size array length mismatch with dataset length.")
 
         for seed in self.seeds:
-            # 1) train/test
+            # 1) train/test split (stratified on labels)
             splitter = StratifiedShuffleSplit(
                 n_splits=1, train_size=0.8, test_size=0.2, random_state=seed
             )
             idx_train, idx_tmp = next(splitter.split(np.zeros_like(y_all), y_all))
             y_tmp = y_all[idx_tmp]
 
-            # 2) decide whether to stratify val/test
-            #    if any class has fewer than 2 samples → fallback 
+            # 2) val/test split
             counts = np.bincount(y_tmp)
-            if counts.min() < 2:
-                # plain ShuffleSplit 50/50
+            # NOTE: if some classes are absent, counts has zeros; guard with >0
+            safe_min = counts[counts > 0].min() if (counts > 0).any() else 0
+            if safe_min < 2:
                 ss = ShuffleSplit(n_splits=1, train_size=0.5, random_state=seed)
                 rel_val, rel_test = next(ss.split(idx_tmp))
-                idx_val = idx_tmp[rel_val]
-                idx_test = idx_tmp[rel_test]
             else:
-                # safe to Stratify
                 splitter_val = StratifiedShuffleSplit(
                     n_splits=1, train_size=0.5, test_size=0.5, random_state=seed
                 )
-                rel_val, rel_test = next(splitter_val.split(
-                    np.zeros_like(y_tmp), y_tmp
-                ))
-                idx_val = idx_tmp[rel_val]
-                idx_test = idx_tmp[rel_test]
+                rel_val, rel_test = next(
+                    splitter_val.split(np.zeros_like(y_tmp), y_tmp)
+                )
 
-            self.datasets.append((
-                Subset(full, idx_train),
-                Subset(full, idx_val),
-                Subset(full, idx_test),
-            ))
+            idx_val = idx_tmp[rel_val]
+            idx_test = idx_tmp[rel_test]
 
-    def train_dataloader(self, seed_idx=0):
-        return DataLoader(self.datasets[seed_idx][0], batch_size=self.batch_size)
+            # Build Subsets
+            ds_train = Subset(full, idx_train)
+            ds_val = Subset(full, idx_val)
+            ds_test = Subset(full, idx_test)
 
-    def val_dataloader(self, seed_idx=0):
-        return DataLoader(self.datasets[seed_idx][1], batch_size=self.batch_size)
+            # Slice precomputed sizes to align with subset-relative indices
+            sz_train = size_array[idx_train]
+            sz_val = size_array[idx_val]
+            sz_test = size_array[idx_test]
 
-    def test_dataloader(self, seed_idx=0):
-        return DataLoader(self.datasets[seed_idx][2], batch_size=self.batch_size)
+            self.datasets.append((ds_train, ds_val, ds_test))
+            self.sizes_triplets.append((sz_train, sz_val, sz_test))
+
+    # Helper to build a loader with a StaticBatchSampler
+    def _make_loader(self, subset: Subset, sizes: np.ndarray, seed: int):
+        sampler = StaticBatchSampler(
+            dataset=subset,
+            sizes=sizes,
+            max_num=self.max_num,
+            skip_too_big=self.skip_too_big,
+            drop_last=self.drop_last,
+            pack_strategy=self.pack_strategy,
+            shuffle_batches_each_epoch=self.shuffle_batch_order,
+            seed=seed,
+            dist_shard=True, # Sampler handles DDP sharding
+            ensure_equal_batch_counts=True,
+        )
+        # Important: when using batch_sampler, DO NOT pass batch_size/shuffle
+        return DataLoader(
+            subset,
+            batch_sampler=sampler,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            persistent_workers=self.persistent_workers,
+        )
+
+    def train_dataloader(self, seed_idx: int = 0):
+        ds_train, _, _ = self.datasets[seed_idx]
+        sz_train, _, _ = self.sizes_triplets[seed_idx]
+        return self._make_loader(ds_train, sz_train, seed=self.seeds[seed_idx])
+
+    def val_dataloader(self, seed_idx: int = 0):
+        _, ds_val, _ = self.datasets[seed_idx]
+        _, sz_val, _ = self.sizes_triplets[seed_idx]
+        # Keep validation deterministic; reuse the same seed
+        return self._make_loader(ds_val, sz_val, seed=self.seeds[seed_idx])
+
+    def test_dataloader(self, seed_idx: int = 0):
+        _, _, ds_test = self.datasets[seed_idx]
+        _, _, sz_test = self.sizes_triplets[seed_idx]
+        return self._make_loader(ds_test, sz_test, seed=self.seeds[seed_idx])
+
 
 # ---------------------------------------------------------------------------
 # LightningModule
@@ -109,29 +198,53 @@ class LitGNN(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(dict(vars(hparams)))
 
+        # --- Prepare extra kwargs for spatial baselines that need edge_dim ---
+        extra_kwargs = {}
+        needs_edge_dim = self.hparams.model in {"cgcnn", "spline", "monet", "ecc"}
+        edge_dim = getattr(self.hparams, "edge_dim", None)
+        if needs_edge_dim and edge_dim is not None:
+            extra_kwargs["edge_dim"] = int(edge_dim)
+
+        # Optional hyper-params for spline/monet (kept optional; rely on model defaults otherwise)
+        if self.hparams.model in {"spline", "monet"}:
+            ek = getattr(self.hparams, "edge_kernel", 0)
+            if isinstance(ek, int) and ek > 0:
+                extra_kwargs["kernel_size"] = ek
+            if self.hparams.model == "spline":
+                deg = getattr(self.hparams, "spline_degree", None)
+                if isinstance(deg, int) and deg > 0:
+                    extra_kwargs["degree"] = deg
+
         self.model = get_model_instance(
-            hparams.model,
+            self.hparams.model,
             dim_in=in_dim,
-            dim_h_gnn=hparams.dim_gnn,
-            dim_h_mlp=hparams.dim_mlp,
+            dim_h_gnn=self.hparams.dim_gnn,
+            dim_h_mlp=self.hparams.dim_mlp,
             dim_out=num_classes,
-            num_layers_gnn=hparams.layers_gnn,
-            num_layers_mlp=hparams.layers_mlp,
-            dropout=hparams.dropout,
-            num_heads=hparams.heads,
+            num_layers_gnn=self.hparams.layers_gnn,
+            num_layers_mlp=self.hparams.layers_mlp,
+            dropout=self.hparams.dropout,
+            num_heads=self.hparams.heads,
+            **extra_kwargs,
         )
 
         self.criterion = torch.nn.CrossEntropyLoss()
         self.topks = [1, 2, 5, 10]
 
-        self.train_acc = Accuracy(top_k=1, task="multiclass", num_classes=num_classes)
-        self.val_accs = torch.nn.ModuleList([
+        self._tm = SimpleNamespace()
+        self._tm.train_acc = Accuracy(top_k=1, task="multiclass", num_classes=num_classes)
+        self._tm.val_accs = torch.nn.ModuleList([
             Accuracy(top_k=k, task="multiclass", num_classes=num_classes) for k in self.topks
         ])
-        self.val_f1_macro = F1Score(average="macro", task="multiclass", num_classes=num_classes)
-        self.val_f1_micro = F1Score(average="micro", task="multiclass", num_classes=num_classes)
-        self.val_auc = AUROC(average="macro", task="multiclass", num_classes=num_classes)
-        self.val_ap = AveragePrecision(average="macro", task="multiclass", num_classes=num_classes)
+        self._tm.val_f1_macro = F1Score(average="macro", task="multiclass", num_classes=num_classes)
+        self._tm.val_f1_micro = F1Score(average="micro", task="multiclass", num_classes=num_classes)
+        self._tm.val_auc = AUROC(average="macro", task="multiclass", num_classes=num_classes)
+        self._tm.val_ap = AveragePrecision(average="macro", task="multiclass", num_classes=num_classes)
+        for m in [self._tm.train_acc, *self._tm.val_accs,
+                  self._tm.val_f1_macro, self._tm.val_f1_micro,
+                  self._tm.val_auc, self._tm.val_ap]:
+            m.to("cpu") # Keep all metric state on CPU to avoid CUDA OOM with many classes
+            m.sync_on_compute = True # Let torchmetrics do cross-process reduction at compute() time
 
         self._train_samples = 0
         self._epoch_start_time = 0.0
@@ -154,17 +267,20 @@ class LitGNN(pl.LightningModule):
         logits = self(batch)
         loss = self.criterion(logits, batch.y)
         y = batch.y.view(-1)
+        # Move inputs for metric updates to CPU (metrics live on CPU)
+        logits_cpu = logits.detach().float().cpu()
+        y_cpu = y.detach().cpu()
 
         if stage == "train":
-            self.train_acc.update(logits, y)
+            self._tm.train_acc.update(logits_cpu, y_cpu)
             self._train_samples += y.size(0)
         else:
-            for acc in self.val_accs:
-                acc.update(logits, y)
-            self.val_f1_macro.update(logits, y)
-            self.val_f1_micro.update(logits, y)
-            self.val_auc.update(logits, y)
-            self.val_ap.update(logits, y)
+            for acc in self._tm.val_accs:
+                acc.update(logits_cpu, y_cpu)
+            self._tm.val_f1_macro.update(logits_cpu, y_cpu)
+            self._tm.val_f1_micro.update(logits_cpu, y_cpu)
+            self._tm.val_auc.update(logits_cpu, y_cpu)
+            self._tm.val_ap.update(logits_cpu, y_cpu)
 
         self.log(f"{stage}_loss", loss, 
                  on_step=False, on_epoch=True, sync_dist=True)
@@ -189,8 +305,9 @@ class LitGNN(pl.LightningModule):
 
     def on_train_epoch_end(self):
         # ---- core metrics
-        self.log("train_top1", self.train_acc.compute(), sync_dist=True)
-        self.train_acc.reset()
+        self.log("train_top1", self._tm.train_acc.compute(), sync_dist=False)
+        # ^ torchmetrics already synced across ranks at compute()
+        self._tm.train_acc.reset()
         # ---- wall time, throughput, GPU memory
         wall_time = time.perf_counter() - self._epoch_start_time
         throughput = self._train_samples / wall_time if wall_time > 0 else 0.0
@@ -204,22 +321,23 @@ class LitGNN(pl.LightningModule):
         self.log("train_gpu_mem_gb", mem_gb, sync_dist=True)
 
     def on_validation_epoch_end(self):
-        for k, acc in zip(self.topks, self.val_accs):
-            self.log(f"val_top{k}", acc.compute(), sync_dist=True); acc.reset()
-        self.log("val_macro_f1",  self.val_f1_macro.compute(), sync_dist=True)
-        self.log("val_micro_f1",  self.val_f1_micro.compute(), sync_dist=True)
-        self.log("val_macro_auc", self.val_auc.compute(), sync_dist=True)
-        self.log("val_macro_ap",  self.val_ap.compute(), sync_dist=True)
-        self.val_f1_macro.reset(); self.val_f1_micro.reset()
-        self.val_auc.reset(); self.val_ap.reset()
+        for k, acc in zip(self.topks, self._tm.val_accs):
+            self.log(f"val_top{k}", acc.compute(), sync_dist=False); acc.reset()
+        self.log("val_macro_f1",  self._tm.val_f1_macro.compute(), sync_dist=False)
+        self.log("val_micro_f1",  self._tm.val_f1_micro.compute(), sync_dist=False)
+        self.log("val_macro_auc", self._tm.val_auc.compute(), sync_dist=False)
+        self.log("val_macro_ap",  self._tm.val_ap.compute(), sync_dist=False)
+        self._tm.val_f1_macro.reset(); self._tm.val_f1_micro.reset()
+        self._tm.val_auc.reset(); self._tm.val_ap.reset()
 
     def on_test_epoch_end(self):
-        for k, acc in zip(self.topks, self.val_accs):
-            self.log(f"test_top{k}", acc.compute(), sync_dist=True)
-        self.log("test_macro_f1",  self.val_f1_macro.compute(), sync_dist=True)
-        self.log("test_micro_f1",  self.val_f1_micro.compute(), sync_dist=True)
-        self.log("test_macro_auc", self.val_auc.compute(), sync_dist=True)
-        self.log("test_macro_ap",  self.val_ap.compute(), sync_dist=True)
+        for k, acc in zip(self.topks, self._tm.val_accs):
+            self.log(f"test_top{k}", acc.compute(), sync_dist=False)
+        self.log("test_macro_f1",  self._tm.val_f1_macro.compute(), sync_dist=False)
+        self.log("test_micro_f1",  self._tm.val_f1_micro.compute(), sync_dist=False)
+        self.log("test_macro_auc", self._tm.val_auc.compute(), sync_dist=False)
+        self.log("test_macro_ap",  self._tm.val_ap.compute(), sync_dist=False)
+
 
 # ---------------------------------------------------------------------------
 # Helper for summarising seeds → mean ± std CSV
@@ -233,39 +351,61 @@ def summarise_csv(csv_in, csv_out):
 
 
 # --- run experiment interactive wrapper --- #
-from argparse import Namespace
 def run_experiment(args: Namespace):
     """
-    Train/validate/test all requested GNN architectures.
-
-    Args
-    ----
-    args : argparse.Namespace – fields identical to the `src/hsg/training.py` script
+    Train/validate/test all requested GNN architectures using static
+    size-capped batches (nodes or edges), avoiding CUDA OOM while keeping a
+    fixed number of steps/epoch.
     """
     # ---------- house-keeping ----------
     save_path = Path(args.save_dir) / args.subset
     save_path.mkdir(parents=True, exist_ok=True)
 
     if args.models == ["all"]:
-        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine"]
+        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine",
+                       "mf", "cgcnn", "ecc", "spline", "monet"]
 
     print(f"⏳  Loading PolyGraph from {args.root}, subset={args.subset}, "
-          f"batch={args.batch_size}, models={args.models}, seeds={args.seeds}")
+          f"batch_cap={int(args.num_max)} {args.mode}s, "
+          f"models={args.models}, seeds={args.seeds}")
 
     # ---------- data ----------
     dm = HSGLitDataModule(
         root=args.root,
         subset=args.subset,
-        batch_size=args.batch_size,
-        seeds=args.seeds
+        seeds=args.seeds,
+        max_num=int(args.num_max),                # cap by total nodes/edges
+        mode=str(getattr(args, "mode", "edge")),  # 'node' or 'edge'
+        skip_too_big=bool(getattr(args, "skip_too_big", True)),
+        drop_last=bool(getattr(args, "drop_last", False)),
+        pack_strategy=str(getattr(args, "pack_strategy", "sorted_desc")),
+        shuffle_batch_order=bool(getattr(args, "shuffle_batch_order", False)),
+        num_workers=int(getattr(args, "num_workers", 0)),
+        pin_memory=bool(getattr(args, "pin_memory", True)),
+        persistent_workers=bool(getattr(args, "persistent_workers", False)),
     )
     dm.prepare_data(); dm.setup()
+
+    # Underlying base dataset (shared across seeds):
+    base_dataset = dm.datasets[0][0].dataset  # Subset(...).dataset
 
     # ---------- loop over architectures ----------
     for model_name in args.models:
         print(f"\n🧠  ▶ Training {model_name} …")
-        args.model = model_name            # inject so LitGNN can see it
+        args.model = model_name
         summaries = []
+
+        # (Optional) add Cartesian pseudo-coordinates for specific models:
+        if model_name in {"spline", "monet"}:
+            base_dataset.transform = T.Cartesian(cat=False)
+            print("   • Applied transforms.Cartesian(cat=False) for pseudo-coordinates.")
+
+        # Detect edge_dim once (same across splits):
+        probe = dm.datasets[0][0][0]
+        args.edge_dim = (int(probe.edge_attr.size(-1))
+                         if getattr(probe, "edge_attr", None) is not None else None)
+        if model_name in {"cgcnn", "ecc", "spline", "monet"}:
+            print(f"   • Detected edge_dim={args.edge_dim} for {model_name}.")
 
         for seed_idx, seed in enumerate(args.seeds):
             pl.seed_everything(seed, workers=True)
@@ -274,33 +414,44 @@ def run_experiment(args: Namespace):
             val_loader   = dm.val_dataloader(seed_idx)
             test_loader  = dm.test_dataloader(seed_idx)
 
-            num_classes = dm.datasets[seed_idx][0].dataset.num_classes
-            in_dim      = dm.datasets[seed_idx][0].dataset.num_node_features
+            # Log steps/epoch (now fixed thanks to static sampler):
+            try:
+                n_steps = len(train_loader)
+                print(f"   • Seed {seed}: steps/epoch={n_steps} "
+                      f"(cap {int(args.num_max)} {args.mode}s)")
+            except Exception:
+                pass
+
+            num_classes = train_loader.dataset.dataset.num_classes
+            in_dim      = train_loader.dataset.dataset.num_node_features
             print(f"   • Seed {seed}: {num_classes} classes, {in_dim} input feats")
 
             lit = LitGNN(args, num_classes, in_dim)
 
-            logger = pl.loggers.TensorBoardLogger(
+            logger = TensorBoardLogger(
                 save_path / "tb_logs" / model_name,
                 name=f"{model_name}_seed{seed}"
             )
             ckpt_dir = save_path / model_name / f"seed_{seed}"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-            ckpt_top1 = pl.callbacks.ModelCheckpoint(
+            ckpt_top1 = ModelCheckpoint(
                 monitor="val_top1", mode="max", dirpath=ckpt_dir,
                 filename="best-top1-{epoch:03d}-{val_top1:.4f}"
             )
-            ckpt_f1 = pl.callbacks.ModelCheckpoint(
+            ckpt_f1 = ModelCheckpoint(
                 monitor="val_macro_f1", mode="max", dirpath=ckpt_dir,
                 filename="best-f1-{epoch:03d}-{val_macro_f1:.4f}"
             )
-            stopper = pl.callbacks.EarlyStopping(
+            stopper = EarlyStopping(
                 monitor="val_macro_f1", patience=args.early_stop_patience, mode="max"
             )
 
             trainer = pl.Trainer(
-                # accelerator="gpu", devices=2, strategy="ddp_spawn",
+                accelerator="gpu",
+                # devices=2,
+                # strategy=...,
+                # use_distributed_sampler=False,
                 max_epochs=args.epochs,
                 logger=logger,
                 log_every_n_steps=args.log_every_n_steps,
@@ -315,105 +466,53 @@ def run_experiment(args: Namespace):
             metrics = {k: float(v) for k, v in trainer.callback_metrics.items()}
             summaries.append({"seed": seed, **metrics})
 
+        # Reset transform so it doesn't leak:
+        base_dataset.transform = None
+
         # ---------- write per-seed + summary CSV ----------
         df_path = save_path / f"{model_name}.csv"
         pd.DataFrame(summaries).to_csv(df_path, index=False)
         summarise_csv(df_path, df_path.with_name(df_path.stem + "_summary.csv"))
         print(f"✅  Finished {model_name}; results → {df_path}")
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
-def main():
-    parser = ArgumentParser()
-    parser.add_argument("--root", type=Path, default=Path("/mnt/ssd/nhsg12m"))
-    parser.add_argument("--save_dir", type=Path, default=Path("/mnt/ssd/baseline_result"))
-    parser.add_argument("--subset", default="one-band")
-    parser.add_argument("--models", nargs="*", default=["gcn", "sage", "gat", "gatv2", "gin", "gine"],
-                        help="Architectures to run; omit for all.")
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--dim_gnn", type=int, default=128)
-    parser.add_argument("--dim_mlp", type=int, default=1024)
-    parser.add_argument("--layers_gnn", type=int, default=4)
-    parser.add_argument("--layers_mlp", type=int, default=2)
-    parser.add_argument("--heads", type=int, default=1)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--lr_init", type=float, default=1e-3, help="Initial learning rate")
-    parser.add_argument("--lr_min", type=float, default=1e-5, help="Minimum learning rate")
-    parser.add_argument("--t0", type=int, default=10, help="T_0 for CosineAnnealingWarmRestarts")
-    parser.add_argument("--t_mult", type=int, default=4, help="T_mult for CosineAnnealingWarmRestarts")
-    parser.add_argument("--seeds", nargs="*", type=int, default=[42, 624, 706])
-    parser.add_argument("--log_every_n_steps", type=int, default=1)
-    parser.add_argument("--early_stop_patience", type=int, default=10)
-    args = parser.parse_args()
 
-    # sanity: check save_dir exists
-    save_path = os.path.join(args.save_dir, args.subset)
-    os.makedirs(save_path, exist_ok=True)
-
-    # sanity: if user passes "all", restore full list
-    if args.models == ["all"]:
-        args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine"]
-
-    print(f"Loading PolyGraph dataset from {args.root}, subset {args.subset}, "
-            f"batch size {args.batch_size}, models {args.models}, seeds {args.seeds}")
-
-    dm = HSGLitDataModule(
-        root=args.root,
-        subset=args.subset,
-        batch_size=args.batch_size,
-        seeds=args.seeds
-    )
-    dm.prepare_data(); dm.setup()
-
-    # loop over architectures
-    for model_name in args.models:
-        args.model = model_name  # inject into hparams for LightningModule
-        summaries: List[Dict[str, float]] = []
-        for seed_idx, seed in enumerate(args.seeds):
-            pl.seed_everything(seed, workers=True)
-
-            # dataloaders for this seed
-            train_loader = dm.train_dataloader(seed_idx)
-            val_loader = dm.val_dataloader(seed_idx)
-            test_loader = dm.test_dataloader(seed_idx)
-
-            num_classes = dm.datasets[seed_idx][0].dataset.num_classes
-            in_dim = dm.datasets[seed_idx][0].dataset.num_node_features
-            print(f"Auto detecting {num_classes} classes, {in_dim} input features")
-
-            lit = LitGNN(args, num_classes, in_dim)
-
-            logger = TensorBoardLogger(os.path.join(save_path, "tb_logs", model_name), 
-                                       name=f"{model_name}_seed{seed}")
-            model_ckpt_path = os.path.join(save_path, model_name, f"seed_{seed}")
-            ckpt_top1 = ModelCheckpoint(monitor="val_top1", mode="max", dirpath=model_ckpt_path,
-                                        filename="best-top1-{epoch:03d}-{val_top1:.4f}")
-            ckpt_f1 = ModelCheckpoint(monitor="val_macro_f1", mode="max", dirpath=model_ckpt_path,
-                                      filename="best-f1-{epoch:03d}-{val_macro_f1:.4f}")
-            stopper = EarlyStopping(monitor="val_macro_f1", patience=args.early_stop_patience, mode="max")
-
-            trainer = pl.Trainer(
-                max_epochs=args.epochs,
-                logger=logger,
-                log_every_n_steps=args.log_every_n_steps,
-                callbacks=[ckpt_top1, ckpt_f1, stopper],
-            )
-            trainer.fit(lit, train_loader, val_loader)
-            trainer.test(ckpt_path=ckpt_f1.best_model_path, dataloaders=test_loader)
-
-            metrics = trainer.callback_metrics
-            summaries.append({
-                "seed": seed,
-                **{k: float(metrics[k]) for k in metrics}
-            })
-
-        # dump per‑seed + summary CSV
-        out_csv = os.path.join(save_path, f"{model_name}.csv")
-        pd.DataFrame(summaries).to_csv(out_csv, index=False)
-        summarise_csv(out_csv, out_csv.replace(".csv", "_summary.csv"))
 
 
 if __name__ == "__main__":
+
+    def main():
+        parser = ArgumentParser()
+        parser.add_argument("--root", type=Path)
+        parser.add_argument("--save_dir", type=Path)
+        parser.add_argument("--subset", type=str, default="one-band")
+        parser.add_argument("--models", nargs="*", default=["all"],
+                            help="Architectures to run; omit for all.")
+        parser.add_argument("--epochs", type=int, default=40)
+        parser.add_argument("--mode", type=str, default="edge")
+        parser.add_argument("--num_max", type=int, default=1e5)
+        parser.add_argument("--skip_too_big", type=bool, default=True)
+        parser.add_argument("--seeds", nargs="*", type=int, default=[42, 624, 706])
+        ### GNN params
+        parser.add_argument("--dim_gnn", type=int, default=128)
+        parser.add_argument("--dim_mlp", type=int, default=128)
+        parser.add_argument("--layers_gnn", type=int, default=4)
+        parser.add_argument("--layers_mlp", type=int, default=2)
+        parser.add_argument("--dropout", type=float, default=0.)
+        # GAT hyper-params
+        parser.add_argument("--heads", type=int, default=1)
+        # spatial conv hyper-params; used only for spline/monet if provided
+        parser.add_argument("--edge_kernel", type=int, default=0,
+                            help="Kernel size for spline/monet. If 0, use model defaults (5 for spline, 25 for MoNet)." )
+        parser.add_argument("--spline_degree", type=int, default=1,
+                            help="Spline polynomial degree. Only used by --models spline when >0.")
+        ### Optimizer params
+        parser.add_argument("--lr_init", type=float, default=1e-3, help="Initial learning rate")
+        parser.add_argument("--lr_min", type=float, default=1e-5, help="Minimum learning rate")
+        parser.add_argument("--t0", type=int, default=10, help="T_0 for CosineAnnealingWarmRestarts")
+        parser.add_argument("--t_mult", type=int, default=4, help="T_mult for CosineAnnealingWarmRestarts")
+        parser.add_argument("--log_every_n_steps", type=int, default=1)
+        parser.add_argument("--early_stop_patience", type=int, default=10)
+        args = parser.parse_args()
+        run_experiment(args)
+    
     main()

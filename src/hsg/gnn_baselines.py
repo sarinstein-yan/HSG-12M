@@ -18,12 +18,16 @@ from torch_geometric.nn.conv import (
     GCNConv,
     GINConv,
     GINEConv,
+    NNConv,
+    SplineConv,
+    GMMConv,
+    CGConv,
     MessagePassing,
     PNAConv,
     SAGEConv,
 )
 from torch_geometric.nn import global_add_pool, global_mean_pool
-from torch_geometric.nn.models import MLP
+from torch_geometric.nn.models import MLP, NeuralFingerprint
 from torch_geometric.nn.models.jumping_knowledge import JumpingKnowledge
 from torch_geometric.nn.resolver import (
     activation_resolver,
@@ -41,6 +45,10 @@ __all__ = [
     'GAT',
     'PNA',
     'EdgeCNN',
+    'ECC',
+    'SplineCNN',
+    'MoNet',
+    'CGCNN',
     'BasicGNN',
     'GNNBaselines',
     'get_model_instance',
@@ -730,6 +738,152 @@ class EdgeCNN(BasicGNN):
         return EdgeConv(mlp, **kwargs)
 
 
+# --- spatial graph baselines ---
+class ECC(BasicGNN):
+    r"""NNConv using :class:`torch_geometric.nn.conv.NNConv`.
+    Required kwargs:
+        - edge_dim (int): dimensionality of edge_attr
+    Optional kwargs:
+        - edge_mlp_hidden (int, default=64): hidden size of the edge network
+        - aggr (str, default='mean'): aggregation ('add', 'mean', 'max')
+    """
+    supports_edge_weight: Final[bool] = False
+    supports_edge_attr: Final[bool] = True
+    supports_norm_batch: Final[bool]
+
+    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
+        edge_dim = kwargs.get('edge_dim', None)
+        if edge_dim is None:
+            raise ValueError("NNConv requires 'edge_dim'. Provide via get_model_instance(..., edge_dim=...).")
+        dim = in_channels * out_channels
+        nn = MLP(
+            [edge_dim, dim, dim],
+            act=self.act,
+            act_first=self.act_first,
+            norm=self.norm,
+            norm_kwargs=self.norm_kwargs,
+        )
+        return NNConv(in_channels, out_channels, nn=nn,
+                      aggr=kwargs.get('aggr', 'add'))
+
+
+class SplineCNN(BasicGNN):
+    r"""SplineCNN using :class:`torch_geometric.nn.conv.SplineConv`.
+    Required kwargs:
+        - edge_dim (int): dimensionality of edge_attr/pseudo-coordinates
+        - kernel_size (int): number of kernels per dimension
+    Optional kwargs:
+        - degree (int, default=1)
+    """
+    supports_edge_weight: Final[bool] = False
+    supports_edge_attr: Final[bool] = True
+    supports_norm_batch: Final[bool]
+
+    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
+        edge_dim = kwargs.get('edge_dim', None)
+        if edge_dim is None:
+            raise ValueError("SplineCNN requires 'edge_dim'. "
+                             "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K, degree=D).")
+        return SplineConv(in_channels, out_channels,
+                          dim=edge_dim, 
+                          kernel_size=kwargs.get('kernel_size', 2), 
+                          degree=kwargs.get('degree', 1),
+                          aggr=kwargs.get('aggr', 'mean'))
+
+
+class MoNet(BasicGNN):
+    r"""MoNet using :class:`torch_geometric.nn.conv.GMMConv`.
+    Required kwargs:
+        - edge_dim (int)
+        - kernel_size (int)
+    Optional kwargs:
+        - separate_gaussians (bool, default=False)
+    """
+    supports_edge_weight: Final[bool] = False
+    supports_edge_attr: Final[bool] = True
+    supports_norm_batch: Final[bool]
+
+    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
+        edge_dim = kwargs.get('edge_dim', None)
+        if edge_dim is None:
+            raise ValueError("MoNet requires 'edge_dim'. "
+                             "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K).")
+        return GMMConv(in_channels, out_channels,
+                       dim=edge_dim, 
+                       kernel_size=kwargs.get('kernel_size', 5),
+                       separate_gaussians=kwargs.get('separate_gaussians', False),
+                       aggr=kwargs.get('aggr', 'mean'))
+
+
+class _cgcnn(BasicGNN):
+    r"""CGCNN using :class:`torch_geometric.nn.conv.CGConv`."""
+    supports_edge_weight: Final[bool] = False
+    supports_edge_attr: Final[bool] = True
+    supports_norm_batch: Final[bool]
+
+    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
+        edge_dim = kwargs.get('edge_dim', None)
+        if edge_dim is None:
+            raise ValueError("CGCNN requires 'edge_dim'. "
+                             "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1)).")
+        if in_channels != out_channels:
+            raise ValueError("CGCNN requires equal input/output channels.")
+        return CGConv(channels=in_channels, dim=edge_dim, 
+                      aggr=kwargs.get('aggr', 'add'), 
+                      batch_norm=kwargs.get('batch_norm', False))
+
+class CGCNN(torch.nn.Module):
+    r"""CGCNN using :class:`torch_geometric.nn.conv.CGConv`.
+    Required kwargs:
+        - edge_dim (int)
+    Notes:
+        - CGConv keeps input/output channels equal ('channels'). This class
+          auto-projects the input features to ``hidden_channels`` once if
+          ``in_channels != hidden_channels``.
+    """
+    def __init__(self, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+                num_layers_gnn, num_layers_mlp, dropout=0.,
+                **kwargs):
+        super().__init__()
+        self._needs_proj = dim_in != dim_h_gnn
+        self.input_proj = Linear(dim_in, dim_h_gnn)
+        self.conv = _cgcnn(in_channels=dim_h_gnn, hidden_channels=dim_h_gnn,
+                        num_layers=num_layers_gnn, out_channels=dim_h_gnn, 
+                        dropout=dropout, **kwargs)
+        self.mlp = MLP(
+            in_channels=dim_h_gnn, hidden_channels=dim_h_mlp,
+            out_channels=dim_out, num_layers=num_layers_mlp, dropout=dropout)
+
+    def forward(self, batch):
+        x, edge_index, edge_attr, batch = batch.x, batch.edge_index, batch.edge_attr, batch.batch
+        if self._needs_proj: x = self.input_proj(x)
+        h = self.conv(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        h = global_add_pool(h, batch)
+        x = self.mlp(h)
+        return x
+
+
+class MF(torch.nn.Module):
+    def __init__(self, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+                num_layers_gnn, num_layers_mlp, dropout=0.,
+                **kwargs):
+        super().__init__()
+        self.mf = NeuralFingerprint(
+                        in_channels=dim_in, hidden_channels=dim_h_gnn,
+                        num_layers=num_layers_gnn, out_channels=dim_h_gnn, 
+                        **kwargs)
+            
+        self.mlp = MLP(
+            in_channels=dim_h_gnn, hidden_channels=dim_h_mlp,
+            out_channels=dim_out, num_layers=num_layers_mlp, dropout=dropout)
+        
+    def forward(self, batch):
+        x, edge_index, batch = batch.x, batch.edge_index, batch.batch
+        h = self.mf(x=x, edge_index=edge_index, batch=batch)
+        x = self.mlp(h)
+        return x
+
+
 class GNNBaselines(torch.nn.Module):
     def __init__(self, base, dim_in, dim_h_conv, dim_h_lin, dim_out,
                  num_layers_conv, num_layers_lin, dropout=0., **kwargs):
@@ -757,7 +911,8 @@ class GNNBaselines(torch.nn.Module):
 
 
 def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
-                      num_layers_gnn, num_layers_mlp, dropout=0., num_heads=1):
+                      num_layers_gnn, num_layers_mlp, dropout=0., num_heads=1, 
+                      **kwargs):
     """Get model instance based on name."""
     if model_name == 'gcn':
         model = GNNBaselines(GCN, 
@@ -785,6 +940,27 @@ def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
         model = GNNBaselines(GINE, 
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
             num_layers_gnn, num_layers_mlp, dropout=dropout)
+    elif model_name == 'ecc':
+        model = GNNBaselines(ECC,
+            dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+    elif model_name == 'spline':
+        # Requires: edge_dim, kernel_size (and optionally degree)
+        model = GNNBaselines(SplineCNN,
+            dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+    elif model_name == 'monet':
+        # Requires: edge_dim, kernel_size (and optionally separate_gaussians)
+        model = GNNBaselines(MoNet,
+            dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+    elif model_name == 'cgcnn':
+        # Requires: edge_dim. Auto-projects input to hidden if needed.
+        model = CGCNN(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+    elif model_name == 'mf':
+        model = MF(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
+            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
     else:
         raise ValueError(f"Unknown model: {model_name}")
     return model

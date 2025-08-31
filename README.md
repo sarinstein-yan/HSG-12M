@@ -1,4 +1,4 @@
-# HSG-12M
+# HSG-12M [![arXiv](https://img.shields.io/badge/arXiv-2412.00568---?logo=arXiv&labelColor=b31b1b&color=grey)](https://arxiv.org/abs/2506.08618)
 
 HSG-12M Spatial Multigraph Dataset.
 
@@ -324,4 +324,20 @@ for i in tqdm(range(num_classes)):
     y.extend([i] * len(tg_i))
 
 print("Number of temporal graphs:", len(thsg))
+```
+
+
+## Citation
+If you find this work useful, please cite our paper:
+
+```bibtex
+@misc{yan2025hsg12mlargescalespatialmultigraph,
+      title={HSG-12M: A Large-Scale Spatial Multigraph Dataset}, 
+      author={Xianquan Yan and Hakan Akgün and Kenji Kawaguchi and N. Duane Loh and Ching Hua Lee},
+      year={2025},
+      eprint={2506.08618},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2506.08618}, 
+}
 ```

@@ -26,7 +26,7 @@ readme = {"file" = "README.md", "content-type" = "text/markdown"}
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3 :: Only",
@@ -36,7 +36,7 @@ classifiers = [
     "Environment :: GPU :: NVIDIA CUDA"
 ]
 dependencies = [
-    "torch~=2.5",
+    "torch>=2.5",
     "lightning",
     "torch_geometric",
     "tensorboard",

@@ -1,4 +1,4 @@
-echo "Pip installing torch=2.6.0, torchvision=0.21.0, torchaudio=2.6.0 for CUDA="$CUDA ...
+echo "Pip installing torch=2.6.0, torchvision=0.21.0, torchaudio=2.6.0 for CUDA=$CUDA ..."
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
             --index-url https://download.pytorch.org/whl/${CUDA}
 
