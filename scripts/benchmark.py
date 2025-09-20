@@ -1,49 +1,116 @@
-from argparse import Namespace
+import time
 from pathlib import Path
-from hsg import run_experiment
-import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+import torch
+import pandas as pd
+from hsg import Config, run_experiment
 
-args = Namespace(
-    root         = Path("/mnt/ssd/nhsg12m"),
-    save_dir     = Path("/mnt/ssd/nhsg12m/baseline_results"),
-    models       = ["gcn", "sage", "gat", "gin", "mf", "cgcnn", "monet"],
-    mode         = "edge",         # 'node' or 'edge'
-    num_max      = 2e5,            # cap on total nodes/edges per batch
-    layers_gnn   = 4,
-    layers_mlp   = 2,
-    dropout      = 0.,
-    lr_init      = 1e-2,
-    lr_min       = 1e-4,
-    heads        = 1,
-    edge_kernel  = 5,
-    # epochs     = 100,
-    # t0         = 34,
-    # t_mult     = 2,
-    seeds        = [42, 624, 706],
-    log_every_n_steps    = 5,
-    early_stop_patience  = 10,
-    # # defaults for arguments used in DataModule
-    # drop_last = False,
-    # pack_strategy = "sorted_desc",
-    # shuffle_batch_order = False,
-    # num_workers = 0,
-    # pin_memory = True,
-    # persistent_workers = False,
-)
+torch.set_float32_matmul_precision("medium")
 
-# ------------------------------------------------------------
-# 4. Convenience loop
-# ------------------------------------------------------------
-subsets_cfg = {
-    # "one-band":   dict(dim_gnn=128, dim_mlp=128, epochs=40, t0=40, t_mult=1),
-    "two-band":   dict(dim_gnn=256, dim_mlp=256,  epochs=40, t0=40, t_mult=1),
-    "topology":   dict(dim_gnn=512, dim_mlp=1500, epochs=10, t0=10, t_mult=1),
-    # "three-band": dict(dim_gnn=512, dim_mlp=1500, epochs=5, t0=5, t_mult=1, seeds=[42]),
-    # "all":        dict(dim_gnn=512, dim_mlp=1500, epochs=5, t0=5, t_mult=1, seeds=[42]),
+# --- Sweep Configuration ---
+DATA_ROOT = "/mnt/ssd/nhsg12m"
+SAVE_DIR = "/mnt/ssd/nhsg12m/HSG-12M/dev/baseline_sweep"
+
+SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
+MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
+SEEDS = [42, 2025, 666]
+EPOCHS = 1
+BATCH_SIZE = 3600
+
+# Model dimensions are tuned per subset
+DIM_H_GNN = {
+    "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 194])),
+    "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 402])),
+    "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
+    "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
+    "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
+}
+DIM_H_MLP = {
+    "one-band": 128, "two-band": 256, "three-band": 1500,
+    "topology": 1500, "all": 1500
 }
 
-# Run the experiments. PyTorch Lightning handles the DDP process launch.
-for subset, cfg in subsets_cfg.items():
-    sweep_args = Namespace(**{**vars(args), "subset": subset, **cfg})
-    run_experiment(sweep_args)
+# Define path for incremental results and ensure directory exists
+results_csv_path = Path(SAVE_DIR) / "sweep_results.csv"
+results_csv_path.parent.mkdir(parents=True, exist_ok=True)
+print(f"📝 Sweep results will be saved to: {results_csv_path}")
+
+# --- Start Sweeping ---
+# FOR TESTING
+for subset in ["one-band", "all", "two-band", "three-band", "topology"]:
+    for model_name in MODEL_NAMES:
+        for seed in SEEDS[:2]:
+            # Create config for the current run
+            cfg = Config(
+                data_root=DATA_ROOT,
+                save_dir=SAVE_DIR,
+                subset=subset,
+                seed=seed,
+                model_name=model_name,
+                epochs=EPOCHS,
+                batch_size=BATCH_SIZE,
+                dim_h_gnn=DIM_H_GNN[subset][model_name],
+                dim_h_mlp=DIM_H_MLP[subset],
+            )
+
+            try:
+                results = run_experiment(cfg)
+                # Add config details for easy grouping later
+                results['subset'] = subset
+                results['model_name'] = model_name
+                results['seed'] = seed
+
+                # --- Flush result to disk immediately ---
+                current_result_df = pd.DataFrame([results])
+                # Append to CSV, write header only if file doesn't exist
+                current_result_df.to_csv(
+                    results_csv_path,
+                    mode='a',
+                    header=not results_csv_path.exists(),
+                    index=False
+                )
+
+                # --- Live Preview ---
+                print(f"✅ Result saved. Preview of results file:")
+                live_preview_df = pd.read_csv(results_csv_path)
+                print(live_preview_df.tail())
+                print("-" * 50)
+
+
+            except Exception as e:
+                print(f"‼️ ERROR running {model_name} on {subset} with seed {seed}: {e}")
+                # Optionally, log the error to a file
+                with open(Path(SAVE_DIR) / "error_log.txt", "a") as f:
+                    f.write(f"[{time.ctime()}] ERROR on {model_name}/{subset}/seed{seed}: {e}\n")
+                continue
+
+# --- Aggregate and Summarize Final Results ---
+if not results_csv_path.exists():
+    print("No experiments were successfully completed. No summary to generate.")
+else:
+    results_df = pd.read_csv(results_csv_path)
+
+    # Identify metric columns to aggregate
+    metric_cols = [col for col in results_df.columns if col not in ['subset', 'model_name', 'seed']]
+
+    # Group by subset and model, then calculate mean and std
+    grouped = results_df.groupby(['subset', 'model_name'])
+    mean_results = grouped[metric_cols].mean()
+    std_results = grouped[metric_cols].std().fillna(0)
+
+    # Format results as "mean ± std" strings
+    summary_df = pd.DataFrame(index=mean_results.index)
+    for col in metric_cols:
+        summary_df[col] = (
+            mean_results[col].map('{:.4f}'.format) + ' ± ' +
+            std_results[col].map('{:.4f}'.format)
+        )
+
+    # Display and save the final summary
+    print("\n\n" + "="*80)
+    print(" " * 28 + "EXPERIMENT SWEEP SUMMARY")
+    print("="*80)
+    print(summary_df)
+
+    summary_path = Path(SAVE_DIR) / "experiment_summary.csv"
+    summary_df.to_csv(summary_path)
+    print(f"\nFinal summary saved to {summary_path}")
