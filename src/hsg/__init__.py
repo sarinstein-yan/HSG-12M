@@ -1,4 +1,4 @@
-__version__ = "0.0.5"
+__version__ = "0.0.6"
 __all__ = [
     "HSG_Generator", "load_class", "get_topology_mask",
     "GCN", "GraphSAGE", 
@@ -8,9 +8,10 @@ __all__ = [
     "PNA", "EdgeCNN",
     "GNNBaselines", "get_model_instance",
     "HSGOnDisk", "HSGInMemory",
-    "StaticBatchSampler",
-    "HSGLitDataModule", "LitGNN",
-    "summarise_csv", "run_experiment",
+    "StaticBatchSampler", "rebalance_batch",
+    "DDPMonitorCallback",
+    "HSGLightningDataModule", "LightningGNN",
+    "Config", "run_experiment",
 ]
 
 from hsg.generation import (
@@ -23,10 +24,11 @@ from hsg.pyg import (
     HSGOnDisk,
     HSGInMemory,
 )
-from hsg.sampler import StaticBatchSampler
+from hsg.sampler import rebalance_batch, StaticBatchSampler
+from hsg.callback import DDPMonitorCallback
 from hsg.training import (
-    HSGLitDataModule,
-    LitGNN,
-    summarise_csv,
+    HSGLightningDataModule,
+    LightningGNN,
+    Config,
     run_experiment,
 )
