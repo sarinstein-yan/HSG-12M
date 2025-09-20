@@ -47,7 +47,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torchmetrics import Accuracy, F1Score, AUROC, AveragePrecision
 
 from hsg.pyg import HSGInMemory
-from hsg.sampler import StaticBatchSampler
+from hsg.sampler import rebalance_batch #StaticBatchSampler
 from hsg.gnn_baselines import get_model_instance
 
 # ---------------------------------------------------------------------------
@@ -58,136 +58,77 @@ class HSGLitDataModule(pl.LightningDataModule):
         self,
         root,
         subset,
-        *,
-        max_num: int,
-        mode: str = "edge",
-        seeds: Sequence[int] = (0,),
-        skip_too_big: bool = True,
-        drop_last: bool = False,
-        pack_strategy: str = "sequential",  # or "sorted_desc"
-        shuffle_batch_order: bool = False,  # shuffle batch *order* each epoch
-        num_workers: int = 0,
-        pin_memory: bool = True,
-        persistent_workers: bool = False,
+        seed: int = 0,
+        transform=None,
+        pre_transform=None,
+        pre_filter=None,
+        batch_size: int = 512,
+        size_mode: str = "edge",  # "node" or "edge"
+        max_num_per_batch: int = 2_000_000,
     ):
         super().__init__()
-        if mode not in ("node", "edge"):
-            raise ValueError("mode must be 'node' or 'edge'")
         self.root, self.subset = root, subset
-        self.max_num = int(max_num)
-        self.mode = mode
-        self.seeds = list(seeds)
-        self.skip_too_big = bool(skip_too_big)
-        self.drop_last = bool(drop_last)
-        self.pack_strategy = pack_strategy
-        self.shuffle_batch_order = bool(shuffle_batch_order)
-
-        self.num_workers = int(num_workers)
-        self.pin_memory = bool(pin_memory)
-        self.persistent_workers = bool(persistent_workers) and (self.num_workers > 0)
-
-        self.datasets: List[Tuple[Subset, Subset, Subset]] = []
-        self.sizes_triplets: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        self.seed = int(seed)
+        self.transform = transform
+        self.pre_transform = pre_transform
+        self.pre_filter = pre_filter
+        self.ds_train = self.ds_val = self.ds_test = None
+        self.sz_train = self.sz_val = self.sz_test = None
+        self.batch_size = int(batch_size)
+        self.mode = size_mode
+        assert self.mode in ["node", "edge"], "size_mode must be 'node' or 'edge'"
+        self.max_num = int(max_num_per_batch)
+        self.base_dataset = None
 
     def prepare_data(self):
-        # Trigger initial download/processing (executed on rank 0 only)
-        _ = HSGInMemory(self.root, self.subset)
+        _ = HSGInMemory(self.root, self.subset,
+                        transform=self.transform,
+                        pre_transform=self.pre_transform,
+                        pre_filter=self.pre_filter)
 
     def setup(self, stage=None):
-        # Setup (executed on all ranks)
-        self.datasets.clear()
-        self.sizes_triplets.clear()
-
-        full = HSGInMemory(self.root, self.subset)
+        full = HSGInMemory(self.root, self.subset, transform=self.transform)
+        self.base_dataset = full
         y_all = full.y.numpy()
         size_key = "n_nodes" if self.mode == "node" else "n_edges"
         if not hasattr(full, size_key):
-             raise RuntimeError(f"Dataset missing size attribute: {size_key}")
-             
-        size_array = np.asarray(
-            getattr(full, size_key),
-            dtype=np.int64,
-        )
+            raise RuntimeError(f"Dataset missing size attribute: {size_key}")
+        size_array = np.asarray(getattr(full, size_key), dtype=np.int64)
         if len(size_array) != len(full):
             raise RuntimeError("Size array length mismatch with dataset length.")
 
-        for seed in self.seeds:
-            # 1) train/test split (stratified on labels)
-            splitter = StratifiedShuffleSplit(
-                n_splits=1, train_size=0.8, test_size=0.2, random_state=seed
-            )
-            idx_train, idx_tmp = next(splitter.split(np.zeros_like(y_all), y_all))
-            y_tmp = y_all[idx_tmp]
+        # Stratified 80/20, then split 20% into 50/50 val/test using the *single* seed
+        splitter = StratifiedShuffleSplit(n_splits=1, train_size=0.8, test_size=0.2, random_state=self.seed)
+        idx_train, idx_tmp = next(splitter.split(np.zeros_like(y_all), y_all))
+        y_tmp = y_all[idx_tmp]
 
-            # 2) val/test split
-            counts = np.bincount(y_tmp)
-            # NOTE: if some classes are absent, counts has zeros; guard with >0
-            safe_min = counts[counts > 0].min() if (counts > 0).any() else 0
-            if safe_min < 2:
-                ss = ShuffleSplit(n_splits=1, train_size=0.5, random_state=seed)
-                rel_val, rel_test = next(ss.split(idx_tmp))
-            else:
-                splitter_val = StratifiedShuffleSplit(
-                    n_splits=1, train_size=0.5, test_size=0.5, random_state=seed
-                )
-                rel_val, rel_test = next(
-                    splitter_val.split(np.zeros_like(y_tmp), y_tmp)
-                )
+        counts = np.bincount(y_tmp)
+        safe_min = counts[counts > 0].min() if (counts > 0).any() else 0
+        if safe_min < 2:
+            ss = ShuffleSplit(n_splits=1, train_size=0.5, random_state=self.seed)
+            rel_val, rel_test = next(ss.split(idx_tmp))
+        else:
+            splitter_val = StratifiedShuffleSplit(n_splits=1, train_size=0.5, test_size=0.5, random_state=self.seed)
+            rel_val, rel_test = next(splitter_val.split(np.zeros_like(y_tmp), y_tmp))
+        idx_val, idx_test = idx_tmp[rel_val], idx_tmp[rel_test]
 
-            idx_val = idx_tmp[rel_val]
-            idx_test = idx_tmp[rel_test]
+        idx_train = rebalance_batch(size_array[idx_train], self.batch_size, self.max_num)
+        idx_val   = rebalance_batch(size_array[idx_val],   self.batch_size, self.max_num)
+        idx_test  = rebalance_batch(size_array[idx_test],  self.batch_size, self.max_num)
+        if idx_train is None or idx_val is None or idx_test is None:
+            raise RuntimeError("Rebalancing failed. Try increasing `max_num_per_batch`.")
 
-            # Build Subsets
-            ds_train = Subset(full, idx_train)
-            ds_val = Subset(full, idx_val)
-            ds_test = Subset(full, idx_test)
+        self.ds_train, self.ds_val, self.ds_test = Subset(full, idx_train), Subset(full, idx_val), Subset(full, idx_test)
+        self.sz_train, self.sz_val, self.sz_test = size_array[idx_train], size_array[idx_val], size_array[idx_test]
 
-            # Slice precomputed sizes to align with subset-relative indices
-            sz_train = size_array[idx_train]
-            sz_val = size_array[idx_val]
-            sz_test = size_array[idx_test]
+    def train_dataloader(self):
+        return DataLoader(self.ds_train, batch_size=self.batch_size)
+    
+    def val_dataloader(self):
+        return DataLoader(self.ds_val, batch_size=self.batch_size)
 
-            self.datasets.append((ds_train, ds_val, ds_test))
-            self.sizes_triplets.append((sz_train, sz_val, sz_test))
-
-    # Helper to build a loader with a StaticBatchSampler
-    def _make_loader(self, subset: Subset, sizes: np.ndarray, seed: int):
-        sampler = StaticBatchSampler(
-            dataset=subset,
-            sizes=sizes,
-            max_num=self.max_num,
-            skip_too_big=self.skip_too_big,
-            drop_last=self.drop_last,
-            pack_strategy=self.pack_strategy,
-            shuffle_batches_each_epoch=self.shuffle_batch_order,
-            seed=seed,
-            dist_shard=True, # Sampler handles DDP sharding
-            ensure_equal_batch_counts=True,
-        )
-        # Important: when using batch_sampler, DO NOT pass batch_size/shuffle
-        return DataLoader(
-            subset,
-            batch_sampler=sampler,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            persistent_workers=self.persistent_workers,
-        )
-
-    def train_dataloader(self, seed_idx: int = 0):
-        ds_train, _, _ = self.datasets[seed_idx]
-        sz_train, _, _ = self.sizes_triplets[seed_idx]
-        return self._make_loader(ds_train, sz_train, seed=self.seeds[seed_idx])
-
-    def val_dataloader(self, seed_idx: int = 0):
-        _, ds_val, _ = self.datasets[seed_idx]
-        _, sz_val, _ = self.sizes_triplets[seed_idx]
-        # Keep validation deterministic; reuse the same seed
-        return self._make_loader(ds_val, sz_val, seed=self.seeds[seed_idx])
-
-    def test_dataloader(self, seed_idx: int = 0):
-        _, _, ds_test = self.datasets[seed_idx]
-        _, _, sz_test = self.sizes_triplets[seed_idx]
-        return self._make_loader(ds_test, sz_test, seed=self.seeds[seed_idx])
+    def test_dataloader(self):
+        return DataLoader(self.ds_test, batch_size=self.batch_size)
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +307,7 @@ def run_experiment(args: Namespace):
                        "mf", "cgcnn", "ecc", "spline", "monet"]
 
     print(f"⏳  Loading PolyGraph from {args.root}, subset={args.subset}, "
-          f"batch_cap={int(args.num_max)} {args.mode}s, "
+          f"batch_cap={int(args.max_num)} {args.mode}s, "
           f"models={args.models}, seeds={args.seeds}")
 
     # ---------- data ----------
@@ -374,7 +315,7 @@ def run_experiment(args: Namespace):
         root=args.root,
         subset=args.subset,
         seeds=args.seeds,
-        max_num=int(args.num_max),                # cap by total nodes/edges
+        max_num=int(args.max_num),                # cap by total nodes/edges
         mode=str(getattr(args, "mode", "edge")),  # 'node' or 'edge'
         skip_too_big=bool(getattr(args, "skip_too_big", True)),
         drop_last=bool(getattr(args, "drop_last", False)),
@@ -418,7 +359,7 @@ def run_experiment(args: Namespace):
             try:
                 n_steps = len(train_loader)
                 print(f"   • Seed {seed}: steps/epoch={n_steps} "
-                      f"(cap {int(args.num_max)} {args.mode}s)")
+                      f"(cap {int(args.max_num)} {args.mode}s)")
             except Exception:
                 pass
 
@@ -490,7 +431,7 @@ if __name__ == "__main__":
                             help="Architectures to run; omit for all.")
         parser.add_argument("--epochs", type=int, default=40)
         parser.add_argument("--mode", type=str, default="edge")
-        parser.add_argument("--num_max", type=int, default=1e5)
+        parser.add_argument("--max_num", type=int, default=1e5)
         parser.add_argument("--skip_too_big", type=bool, default=True)
         parser.add_argument("--seeds", nargs="*", type=int, default=[42, 624, 706])
         ### GNN params

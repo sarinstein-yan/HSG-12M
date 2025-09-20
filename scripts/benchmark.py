@@ -2,12 +2,12 @@ from argparse import Namespace
 from pathlib import Path
 from hsg import run_experiment
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 args = Namespace(
     root         = Path("/mnt/ssd/nhsg12m"),
-    save_dir     = Path("/mnt/ssd/nhsg12m/HSG-12M/dev/baseline"),
-    models       = ["gcn"], # "mf", "cgcnn", "gin", "monet"
+    save_dir     = Path("/mnt/ssd/nhsg12m/baseline_results"),
+    models       = ["gcn", "sage", "gat", "gin", "mf", "cgcnn", "monet"],
     mode         = "edge",         # 'node' or 'edge'
     num_max      = 2e5,            # cap on total nodes/edges per batch
     layers_gnn   = 4,
@@ -20,7 +20,7 @@ args = Namespace(
     # epochs     = 100,
     # t0         = 34,
     # t_mult     = 2,
-    seeds        = [42], # 624, 706],
+    seeds        = [42, 624, 706],
     log_every_n_steps    = 5,
     early_stop_patience  = 10,
     # # defaults for arguments used in DataModule
@@ -30,17 +30,16 @@ args = Namespace(
     # num_workers = 0,
     # pin_memory = True,
     # persistent_workers = False,
-    # fast_dev_run = True,
 )
 
 # ------------------------------------------------------------
 # 4. Convenience loop
 # ------------------------------------------------------------
 subsets_cfg = {
-    "one-band":   dict(dim_gnn=128, dim_mlp=128, epochs=1, t0=1, t_mult=1),
-    # "topology":   dict(dim_gnn=512, dim_mlp=1500, epochs=20, t0=20, t_mult=1),
-    # "three-band": dict(dim_gnn=512, dim_mlp=1500, epochs=10, t0=10, t_mult=1, seeds=[42]),
-    # "two-band":   dict(dim_gnn=256, dim_mlp=256,  epochs=40, t0=40, t_mult=1),
+    # "one-band":   dict(dim_gnn=128, dim_mlp=128, epochs=40, t0=40, t_mult=1),
+    "two-band":   dict(dim_gnn=256, dim_mlp=256,  epochs=40, t0=40, t_mult=1),
+    "topology":   dict(dim_gnn=512, dim_mlp=1500, epochs=10, t0=10, t_mult=1),
+    # "three-band": dict(dim_gnn=512, dim_mlp=1500, epochs=5, t0=5, t_mult=1, seeds=[42]),
     # "all":        dict(dim_gnn=512, dim_mlp=1500, epochs=5, t0=5, t_mult=1, seeds=[42]),
 }
 
