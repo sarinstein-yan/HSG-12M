@@ -457,6 +457,7 @@ def run_experiment(args: Namespace):
                 log_every_n_steps=args.log_every_n_steps,
                 callbacks=[ckpt_top1, ckpt_f1, stopper],
                 deterministic=True,
+                fast_dev_run=getattr(args, "fast_dev_run", False)
             )
 
             trainer.fit(lit, train_loader, val_loader)
@@ -510,8 +511,9 @@ if __name__ == "__main__":
         parser.add_argument("--lr_min", type=float, default=1e-5, help="Minimum learning rate")
         parser.add_argument("--t0", type=int, default=10, help="T_0 for CosineAnnealingWarmRestarts")
         parser.add_argument("--t_mult", type=int, default=4, help="T_mult for CosineAnnealingWarmRestarts")
-        parser.add_argument("--log_every_n_steps", type=int, default=1)
+        parser.add_argument("--log_every_n_steps", type=int, default=5)
         parser.add_argument("--early_stop_patience", type=int, default=10)
+        parser.add_argument("--fast_dev_run", type=bool, default=False)
         args = parser.parse_args()
         run_experiment(args)
     
