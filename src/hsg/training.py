@@ -1,4 +1,5 @@
 import os
+import gc
 import time
 import numpy as np
 import pandas as pd
@@ -346,6 +347,14 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
 
     trainer.fit(gnn, datamodule=dm)
     test_results = trainer.test(ckpt_path=ckpt_f1.best_model_path, datamodule=dm)
+
+    # Clean up on other ranks and exit the function
+    if not trainer.is_global_zero:
+        del trainer, gnn, dm
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return None
     
     # 5. Collect and return results
     final_results = test_results[0] # Results are in a list
@@ -355,11 +364,10 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
 
     # Clean up to free memory
     del trainer, gnn, dm
-    import gc
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
+    
     return final_results
 
 

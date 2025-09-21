@@ -111,6 +111,6 @@ else:
     print("="*80)
     print(summary_df)
 
-    summary_path = Path(SAVE_DIR) / "experiment_summary.csv"
+    summary_path = Path(SAVE_DIR) / "benchmark_summary.csv"
     summary_df.to_csv(summary_path)
     print(f"\nFinal summary saved to {summary_path}")
