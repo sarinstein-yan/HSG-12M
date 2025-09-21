@@ -86,6 +86,7 @@ class HSGLitDataModule(pl.LightningDataModule):
         self.pin_memory = bool(pin_memory)
         self.persistent_workers = bool(persistent_workers) and (self.num_workers > 0)
 
+        self.transform = None  # No default transform
         self.datasets: List[Tuple[Subset, Subset, Subset]] = []
         self.sizes_triplets: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
 
@@ -215,6 +216,7 @@ class LitGNN(pl.LightningModule):
                 if isinstance(deg, int) and deg > 0:
                     extra_kwargs["degree"] = deg
 
+        # TODO: Should these be moved to `setup()`?
         self.model = get_model_instance(
             self.hparams.model,
             dim_in=in_dim,
@@ -246,8 +248,12 @@ class LitGNN(pl.LightningModule):
             m.to("cpu") # Keep all metric state on CPU to avoid CUDA OOM with many classes
             m.sync_on_compute = True # Let torchmetrics do cross-process reduction at compute() time
 
+        # Track per-epoch runtime stats for CSV summary
         self._train_samples = 0
         self._epoch_start_time = 0.0
+        self._epoch_wall_times = []
+        self._epoch_throughputs = []
+        self._epoch_peak_mem_gb = []
 
     # optimiser + scheduler (Warm Restarts)
     def configure_optimizers(self):
@@ -257,6 +263,28 @@ class LitGNN(pl.LightningModule):
         sch = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             opt, T_0=self.hparams.t0, T_mult=self.hparams.t_mult, eta_min=self.hparams.lr_min
         )
+        # lr_scheduler_config = {
+        #     # REQUIRED: The scheduler instance
+        #     "scheduler": lr_scheduler,
+        #     # The unit of the scheduler's step size, could also be 'step'.
+        #     # 'epoch' updates the scheduler on epoch end whereas 'step'
+        #     # updates it after a optimizer update.
+        #     "interval": "epoch",
+        #     # How many epochs/steps should pass between calls to
+        #     # `scheduler.step()`. 1 corresponds to updating the learning
+        #     # rate after every epoch/step.
+        #     "frequency": 1,
+        #     # Metric to monitor for schedulers like `ReduceLROnPlateau`
+        #     "monitor": "val_loss",
+        #     # If set to `True`, will enforce that the value specified 'monitor'
+        #     # is available when the scheduler is updated, thus stopping
+        #     # training if not found. If set to `False`, it will only produce a warning
+        #     "strict": True,
+        #     # If using the `LearningRateMonitor` callback to monitor the
+        #     # learning rate progress, this keyword can be used to specify
+        #     # a custom logged name
+        #     "name": None,
+        # }
         return {"optimizer": opt, "lr_scheduler": sch}
 
     # forward + shared step
@@ -312,13 +340,24 @@ class LitGNN(pl.LightningModule):
         wall_time = time.perf_counter() - self._epoch_start_time
         throughput = self._train_samples / wall_time if wall_time > 0 else 0.0
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             mem_gb = torch.cuda.max_memory_allocated() / 1024**3
         else:
             mem_gb = 0.0
 
+        # Log per-epoch stats
         self.log("train_wall_time_s", wall_time, sync_dist=True)
         self.log("train_throughput_samples_s", throughput, sync_dist=True)
-        self.log("train_gpu_mem_gb", mem_gb, sync_dist=True)
+        # Use max across ranks for memory in case of multi-GPU
+        try:
+            self.log("train_gpu_mem_gb", mem_gb, sync_dist=True, reduce_fx=torch.max)
+        except Exception:
+            self.log("train_gpu_mem_gb", mem_gb, sync_dist=True)
+
+        # Save for CSV summary aggregation
+        self._epoch_wall_times.append(float(wall_time))
+        self._epoch_throughputs.append(float(throughput))
+        self._epoch_peak_mem_gb.append(float(mem_gb))
 
     def on_validation_epoch_end(self):
         for k, acc in zip(self.topks, self._tm.val_accs):
@@ -331,6 +370,7 @@ class LitGNN(pl.LightningModule):
         self._tm.val_auc.reset(); self._tm.val_ap.reset()
 
     def on_test_epoch_end(self):
+        # TODO: use `log_dict` instead
         for k, acc in zip(self.topks, self._tm.val_accs):
             self.log(f"test_top{k}", acc.compute(), sync_dist=False)
         self.log("test_macro_f1",  self._tm.val_f1_macro.compute(), sync_dist=False)
@@ -338,6 +378,25 @@ class LitGNN(pl.LightningModule):
         self.log("test_macro_auc", self._tm.val_auc.compute(), sync_dist=False)
         self.log("test_macro_ap",  self._tm.val_ap.compute(), sync_dist=False)
 
+    def configure_callbacks(self):
+        pass
+
+    # Aggregated per-fit runtime stats (used in CSV summary)
+    def get_train_runtime_summary(self):
+        def _last(xs):
+            return float(xs[-1]) if xs else 0.0
+        def _mean(xs):
+            return float(sum(xs) / len(xs)) if xs else 0.0
+        return {
+            # Last epoch values
+            "train_wall_time_s_last": _last(self._epoch_wall_times),
+            "train_throughput_samples_s_last": _last(self._epoch_throughputs),
+            "train_gpu_mem_gb_last": _last(self._epoch_peak_mem_gb),
+            # Aggregates across epochs
+            "train_wall_time_s_mean": _mean(self._epoch_wall_times),
+            "train_throughput_samples_s_mean": _mean(self._epoch_throughputs),
+            "train_gpu_mem_gb_peak": float(max(self._epoch_peak_mem_gb)) if self._epoch_peak_mem_gb else 0.0,
+        }
 
 # ---------------------------------------------------------------------------
 # Helper for summarising seeds → mean ± std CSV
@@ -358,6 +417,7 @@ def run_experiment(args: Namespace):
     fixed number of steps/epoch.
     """
     # ---------- house-keeping ----------
+    # TODO: add a flag `load_from_ckpt`
     save_path = Path(args.save_dir) / args.subset
     save_path.mkdir(parents=True, exist_ok=True)
 
@@ -365,6 +425,7 @@ def run_experiment(args: Namespace):
         args.models = ["gcn", "sage", "gat", "gatv2", "gin", "gine",
                        "mf", "cgcnn", "ecc", "spline", "monet"]
 
+    # TODO: move all these to LitGNN hyper-params. And use self.print() for rank 0 printing.
     print(f"⏳  Loading PolyGraph from {args.root}, subset={args.subset}, "
           f"batch_cap={int(args.num_max)} {args.mode}s, "
           f"models={args.models}, seeds={args.seeds}")
@@ -464,6 +525,11 @@ def run_experiment(args: Namespace):
 
             # ---------- gather metrics ----------
             metrics = {k: float(v) for k, v in trainer.callback_metrics.items()}
+            # Add aggregated train runtime stats (last/mean/peak)
+            try:
+                metrics.update(lit.get_train_runtime_summary())
+            except Exception:
+                pass
             summaries.append({"seed": seed, **metrics})
 
         # Reset transform so it doesn't leak:
