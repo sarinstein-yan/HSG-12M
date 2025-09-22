@@ -12,14 +12,15 @@ def is_rank_zero():
     return dist.get_rank() == 0 if dist.is_available() and dist.is_initialized() else True
 
 # --- Sweep Configuration ---
-DATA_ROOT = "/mnt/ssd/nhsg12m"
-SAVE_DIR = "/mnt/ssd/nhsg12m/HSG-12M/dev/baseline_sweep"
+DATA_ROOT = ...
+SAVE_DIR = ...
 
 SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
 MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
 SEEDS = [42, 2025, 666]
-EPOCHS = 50
-BATCH_SIZE = 5000
+MAX_EPOCHS = 100
+MAX_STEPS = 5000
+BATCH_SIZE = 3500
 
 # Model dimensions are tuned per subset
 DIM_H_GNN = {
@@ -51,7 +52,8 @@ for subset in ["one-band"]:#, "all", "two-band", "three-band", "topology"]:
                 subset=subset,
                 seed=seed,
                 model_name=model_name,
-                epochs=EPOCHS,
+                max_epochs=MAX_EPOCHS,
+                max_steps=MAX_STEPS,
                 batch_size=BATCH_SIZE,
                 dim_h_gnn=DIM_H_GNN[subset][model_name],
                 dim_h_mlp=DIM_H_MLP[subset],
