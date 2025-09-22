@@ -566,7 +566,7 @@ class GINE(BasicGNN):
             norm_kwargs=self.norm_kwargs,
         )
         return GINEConv(mlp, 
-                        edge_dim=-1,
+                        edge_dim=kwargs.get('edge_dim', None),
                         **kwargs)
 
 class GAT(BasicGNN):
@@ -622,6 +622,7 @@ class GAT(BasicGNN):
         v2 = kwargs.pop('v2', False)
         heads = kwargs.pop('heads', 1)
         concat = kwargs.pop('concat', True)
+        edge_dim = kwargs.pop('edge_dim', None)
 
         # Do not use concatenation in case the layer `GATConv` layer maps to
         # the desired output channels (out_channels != None and jk != None):
@@ -640,7 +641,7 @@ class GAT(BasicGNN):
         return Conv(in_channels, out_channels, heads=heads, concat=concat,
                     dropout=self.dropout.p, 
                     add_self_loops=False,
-                    edge_dim=-1,
+                    edge_dim=edge_dim,
                     **kwargs)
 
 
@@ -751,8 +752,8 @@ class ECC(BasicGNN):
     supports_edge_attr: Final[bool] = True
     supports_norm_batch: Final[bool]
 
-    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
-        edge_dim = kwargs.get('edge_dim', None)
+    def init_conv(self, in_channels: int, out_channels: int, 
+                  edge_dim: int | None = None, **kwargs) -> MessagePassing:
         if edge_dim is None:
             raise ValueError("NNConv requires 'edge_dim'. Provide via get_model_instance(..., edge_dim=...).")
         dim = in_channels * out_channels
@@ -779,8 +780,8 @@ class SplineCNN(BasicGNN):
     supports_edge_attr: Final[bool] = True
     supports_norm_batch: Final[bool]
 
-    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
-        edge_dim = kwargs.get('edge_dim', None)
+    def init_conv(self, in_channels: int, out_channels: int, 
+                  edge_dim: int | None = None, **kwargs) -> MessagePassing:
         if edge_dim is None:
             raise ValueError("SplineCNN requires 'edge_dim'. "
                              "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K, degree=D).")
@@ -803,8 +804,8 @@ class MoNet(BasicGNN):
     supports_edge_attr: Final[bool] = True
     supports_norm_batch: Final[bool]
 
-    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
-        edge_dim = kwargs.get('edge_dim', None)
+    def init_conv(self, in_channels: int, out_channels: int, 
+                  edge_dim: int | None = None, **kwargs) -> MessagePassing:
         if edge_dim is None:
             raise ValueError("MoNet requires 'edge_dim'. "
                              "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K).")
@@ -821,8 +822,8 @@ class _cgcnn(BasicGNN):
     supports_edge_attr: Final[bool] = True
     supports_norm_batch: Final[bool]
 
-    def init_conv(self, in_channels: int, out_channels: int, **kwargs) -> MessagePassing:
-        edge_dim = kwargs.get('edge_dim', None)
+    def init_conv(self, in_channels: int, out_channels: int, 
+                  edge_dim: int | None = None, **kwargs) -> MessagePassing:
         if edge_dim is None:
             raise ValueError("CGCNN requires 'edge_dim'. "
                              "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1)).")
@@ -888,6 +889,7 @@ class GNNBaselines(torch.nn.Module):
     def __init__(self, base, dim_in, dim_h_conv, dim_h_lin, dim_out,
                  num_layers_conv, num_layers_lin, dropout=0., **kwargs):
         super().__init__()
+        self.__class__.__name__ = base.__class__.__name__  # for logging
         self.baseline = base(
             in_channels=dim_in, hidden_channels=dim_h_conv,
             num_layers=num_layers_conv, out_channels=dim_h_conv, 
@@ -912,7 +914,7 @@ class GNNBaselines(torch.nn.Module):
 
 def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
                       num_layers_gnn, num_layers_mlp, dropout=0., num_heads=1, 
-                      **kwargs):
+                      edge_dim=None, **kwargs):
     """Get model instance based on name."""
     if model_name == 'gcn':
         model = GNNBaselines(GCN, 
@@ -926,12 +928,12 @@ def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
         model = GNNBaselines(GAT, 
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
             num_layers_gnn, num_layers_mlp, dropout=dropout,
-            v2=False, heads=num_heads)
+            v2=False, heads=num_heads, edge_dim=edge_dim)
     elif model_name == 'gatv2':
         model = GNNBaselines(GAT, 
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
             num_layers_gnn, num_layers_mlp, dropout=dropout,
-            v2=True, heads=num_heads)
+            v2=True, heads=num_heads, edge_dim=edge_dim)
     elif model_name == 'gin':
         model = GNNBaselines(GIN, 
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
@@ -939,28 +941,33 @@ def get_model_instance(model_name, dim_in, dim_h_gnn, dim_h_mlp, dim_out,
     elif model_name == 'gine':
         model = GNNBaselines(GINE, 
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
-            num_layers_gnn, num_layers_mlp, dropout=dropout)
+            num_layers_gnn, num_layers_mlp, dropout=dropout, 
+            edge_dim=edge_dim)
     elif model_name == 'ecc':
         model = GNNBaselines(ECC,
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
-            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+            num_layers_gnn, num_layers_mlp, dropout=dropout, 
+            edge_dim=edge_dim, **kwargs)
     elif model_name == 'spline':
         # Requires: edge_dim, kernel_size (and optionally degree)
         model = GNNBaselines(SplineCNN,
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
-            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+            num_layers_gnn, num_layers_mlp, dropout=dropout, 
+            edge_dim=edge_dim, **kwargs)
     elif model_name == 'monet':
         # Requires: edge_dim, kernel_size (and optionally separate_gaussians)
         model = GNNBaselines(MoNet,
             dim_in, dim_h_gnn, dim_h_mlp, dim_out,
-            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+            num_layers_gnn, num_layers_mlp, dropout=dropout, 
+            edge_dim=edge_dim, **kwargs)
     elif model_name == 'cgcnn':
         # Requires: edge_dim. Auto-projects input to hidden if needed.
         model = CGCNN(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
-            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+            num_layers_gnn, num_layers_mlp, dropout=dropout, 
+            edge_dim=edge_dim, **kwargs)
     elif model_name == 'mf':
         model = MF(dim_in, dim_h_gnn, dim_h_mlp, dim_out,
-            num_layers_gnn, num_layers_mlp, dropout=dropout, **kwargs)
+            num_layers_gnn, num_layers_mlp, dropout=dropout)
     else:
         raise ValueError(f"Unknown model: {model_name}")
     return model

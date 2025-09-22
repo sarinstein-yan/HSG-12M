@@ -1,6 +1,110 @@
 import numpy as np
+import heapq
 import torch
-from typing import Iterator, List, Sequence
+from typing import Iterator, List, Sequence, Optional
+
+
+def rebalance_batch(
+    sample_sizes: np.ndarray, 
+    batch_size: int, 
+    max_num_per_batch: int
+) -> Optional[np.ndarray]:
+    """Rebalance the batch by permuting the sample sizes.
+
+    Parameters
+    ----------
+    sample_sizes : np.ndarray
+        1D array of sample sizes (e.g., num_nodes or num_edges)
+    batch_size : int
+        Number of samples per batch
+    max_sum_per_batch : int
+        Maximum sum of sample sizes per batch. Recommended to set to 80% of the
+        maximum that your hardware can handle.
+
+    Returns
+    -------
+    Optional[np.ndarray]
+        1D array of indices representing the new order of samples, 
+        or None if rebalancing is not possible
+    """    
+    if not isinstance(sample_sizes, np.ndarray) or sample_sizes.ndim != 1:
+        raise TypeError("arr must be 1D NumPy array")
+    if batch_size <= 0 or max_num_per_batch <= 0:
+        raise ValueError("batch_size and max_sum_per_batch must be positive")
+    if sample_sizes.size == 0:
+        return np.empty(0, dtype=np.int64)
+    if np.any(sample_sizes > max_num_per_batch):
+        return None
+
+    n = sample_sizes.size
+    m = (n + batch_size - 1) // batch_size  # num batches
+    # batch capacities: last batch may be partial
+    caps = np.full(m, batch_size, dtype=np.int32)
+    r = n % batch_size
+    if r != 0:
+        caps[-1] = r
+
+    # Sort once in C: indices descending by value
+    order = np.argsort(sample_sizes, kind="stable")[::-1]
+    values = sample_sizes[order]
+
+    # Heap of (current_sum, batch_idx)
+    batch_sum = np.zeros(m, dtype=np.int64)
+    batch_rem = caps.copy()
+    heap = [(0, i) for i in range(m)]
+    heapq.heapify(heap)
+
+    # Preallocate output placement
+    # Compute fixed starting offsets for each batch:
+    # e.g., batch 0 starts at 0, batch 1 at caps[0], etc.
+    start = np.zeros(m, dtype=np.int64)
+    np.cumsum(caps[:-1], out=start[1:])
+    fill = np.zeros(m, dtype=np.int64)
+    out = np.empty(n, dtype=np.int64)
+
+    rejected = []  # reuse list to avoid reallocs
+
+    for k in range(n):
+        idx = order[k]
+        x = int(values[k])
+
+        placed = False
+        # Try batches, starting from smallest sum
+        while heap:
+            s, b = heap[0]  # peek
+            if batch_rem[b] == 0:
+                heapq.heappop(heap)          # permanently discard full batch
+                continue
+            if s + x > max_num_per_batch:
+                # Temporarily move it aside while we try others
+                heapq.heappop(heap)
+                rejected.append((s, b))
+                continue
+
+            # Place item
+            heapq.heappop(heap)
+            pos = start[b] + fill[b]
+            out[pos] = idx
+            fill[b] += 1
+            batch_rem[b] -= 1
+            new_sum = s + x
+            batch_sum[b] = new_sum
+            # If capacity remains, push back; else never push again
+            if batch_rem[b] > 0:
+                heapq.heappush(heap, (int(new_sum), b))
+            placed = True
+            break
+
+        # Restore rejected
+        if rejected:
+            for item in rejected:
+                heapq.heappush(heap, item)
+            rejected.clear()
+
+        if not placed:
+            return None
+
+    return out
 
 
 class StaticBatchSampler(torch.utils.data.Sampler[List[int]]):
@@ -38,7 +142,8 @@ class StaticBatchSampler(torch.utils.data.Sampler[List[int]]):
         self.pack_strategy = pack_strategy
         self.shuffle_batches_each_epoch = bool(shuffle_batches_each_epoch)
         self._rng = torch.Generator()
-        self._rng.manual_seed(int(seed))
+        self._base_seed = int(seed)
+        self._rng.manual_seed(self._base_seed)
         self.dist_shard = bool(dist_shard)
         self.ensure_equal_batch_counts = bool(ensure_equal_batch_counts)
 
@@ -102,10 +207,12 @@ class StaticBatchSampler(torch.utils.data.Sampler[List[int]]):
 
         rank, world_size = self._world_info()
         if self.dist_shard and self.ensure_equal_batch_counts and world_size > 1:
-            usable = len(idxs) - (len(idxs) % world_size)
-            if usable <= 0:
-                usable = len(idxs)  # don't drop everything if batches < world_size
-            idxs = idxs[:usable]
+            # Pad to a multiple of world_size so all ranks see the same #steps.
+            if len(idxs) > 0:
+                pad = (-len(idxs)) % world_size
+                if pad:
+                    idxs.extend([idxs[-1]] * pad)  # repeat last batch id
+            # if len(idxs) == 0: keep empty
 
         # Manual DDP Sharding
         for local_j, j in enumerate(idxs):
@@ -119,12 +226,18 @@ class StaticBatchSampler(torch.utils.data.Sampler[List[int]]):
         n = len(self._batches)
         _, world_size = self._world_info()
         if self.dist_shard and world_size > 1:
-            usable = n - (n % world_size) if self.ensure_equal_batch_counts else n
-            return max(int(usable / world_size), 0)
+            # With padding in __iter__, each rank gets ceil(n/world_size).
+            # If n == 0, return 0 to avoid a phantom step.
+            if self.ensure_equal_batch_counts:
+                return 0 if n == 0 else (n + world_size - 1) // world_size
+            # If you explicitly disable equal batch counts, we still report ceil
+            # to avoid under-reporting. Prefer leaving ensure_equal_batch_counts=True for train.
+            return 0 if n == 0 else (n + world_size - 1) // world_size
         return n
 
-    # # Optional: allow trainers/callbacks to vary batch order per epoch deterministically
-    # def set_epoch(self, epoch: int):
-    #     # Mix seed with epoch for reproducible reshuffles
-    #     base = int(self._rng.initial_seed())
-    #     self._rng.manual_seed(base ^ (epoch + 2025))
+    # Allow trainers (e.g., PyTorch Lightning) to reshuffle deterministically each epoch.
+    # Lightning will call this if present.
+    def set_epoch(self, epoch: int):
+        # Mix epoch into the base seed (64-bit golden ratio constant for diffusion).
+        mix = (epoch * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+        self._rng.manual_seed(self._base_seed ^ mix)
