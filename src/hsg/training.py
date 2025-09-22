@@ -158,7 +158,7 @@ class LightningGNN(pl.LightningModule):
         lr_init: float = 1e-3,
         lr_min: float = 1e-5,
         weight_decay: float = 0.0,
-        T_0: int = None,
+        T_0: int = 100,
         *,
         edge_dim: int | None = None,
         num_heads: int = 1,  # only for GAT | GATv2
@@ -195,10 +195,8 @@ class LightningGNN(pl.LightningModule):
         opt = torch.optim.AdamW(
             self.model.parameters(), lr=self.hparams.lr_init, amsgrad=True, weight_decay=self.hparams.weight_decay
         )
-        t0 = self.hparams.T_0
-        T_0 = t0 if t0 is not None else self.trainer.num_training_batches
         sch = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            opt, T_0=T_0, eta_min=self.hparams.lr_min
+            opt, T_0=self.hparams.T_0, eta_min=self.hparams.lr_min
         )
         return {"optimizer": opt, "lr_scheduler": sch}
 
@@ -245,7 +243,8 @@ class Config:
     # Training
     model_name: str = "gcn"
     batch_size: int = 4096
-    epochs: int = 50
+    max_epochs: int = 100
+    max_steps: int = -1
     
     # DataModule
     size_mode: str = "edge"
@@ -265,7 +264,7 @@ class Config:
     lr_init: float = 1e-3
     lr_min: float = 1e-5
     weight_decay: float = 0.0
-    T_0: int | None = None
+    T_0: int = 100
 
     # Trainer
     devices: int | str = "auto"
@@ -309,7 +308,7 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
         lr_init=cfg.lr_init,
         lr_min=cfg.lr_min,
         weight_decay=cfg.weight_decay,
-        T_0=len(dm.train_dataloader()),
+        T_0=cfg.T_0,
         edge_dim=dm.edge_dim,
         num_heads=cfg.num_heads,
         kernel_size=cfg.kernel_size,
@@ -389,7 +388,8 @@ if __name__ == "__main__":
     SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
     MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
     SEEDS = [42, 2025, 666]
-    EPOCHS = 50
+    MAX_EPOCHS = 100
+    MAX_STEPS = 5000
     BATCH_SIZE = 3500
 
     # Model dimensions are tuned per subset
@@ -422,7 +422,8 @@ if __name__ == "__main__":
                     subset=subset,
                     seed=seed,
                     model_name=model_name,
-                    epochs=EPOCHS,
+                    max_epochs=MAX_EPOCHS,
+                    max_steps=MAX_STEPS,
                     batch_size=BATCH_SIZE,
                     dim_h_gnn=DIM_H_GNN[subset][model_name],
                     dim_h_mlp=DIM_H_MLP[subset],
