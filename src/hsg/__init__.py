@@ -1,11 +1,9 @@
-__version__ = "0.0.6"
+__version__ = "0.0.7"
 __all__ = [
     "HSG_Generator", "load_class", "get_topology_mask",
-    "GCN", "GraphSAGE", 
-    "GIN", "GINE", 
-    "GAT", "GATv2",
-    "CGCNN", "SplineCNN", "Monet", 
-    "PNA", "EdgeCNN",
+    "GCN", "GraphSAGE", "GIN", "GINE",
+    "GAT", "GATv2", "PNA", "EdgeCNN",
+    "CGCNN", "SplineCNN", "MoNet", "MF",
     "GNNBaselines", "get_model_instance",
     "HSGOnDisk", "HSGInMemory",
     "StaticBatchSampler", "rebalance_batch",
@@ -21,8 +19,8 @@ from hsg.generation import (
 )
 from hsg.gnn_baselines import *
 from hsg.pyg import (
-    HSGOnDisk,
     HSGInMemory,
+    HSGOnDisk,
 )
 from hsg.sampler import rebalance_batch, StaticBatchSampler
 from hsg.callback import DDPMonitorCallback

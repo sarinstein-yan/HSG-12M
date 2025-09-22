@@ -1,4 +1,4 @@
-import time
+import time, os
 from pathlib import Path
 import torch
 import torch.distributed as dist
@@ -12,15 +12,16 @@ def is_rank_zero():
     return dist.get_rank() == 0 if dist.is_available() and dist.is_initialized() else True
 
 # --- Sweep Configuration ---
-DATA_ROOT = ...
-SAVE_DIR = ...
+DATA_ROOT = os.getenv("HSG_DATA_ROOT", "data/hsg")
+SAVE_DIR = os.getenv("HSG_SAVE_DIR", "results/hsg_benchmark")
 
 SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
 MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
 SEEDS = [42, 2025, 666]
 MAX_EPOCHS = 100
-MAX_STEPS = 5000
-BATCH_SIZE = 3500
+MAX_STEPS = 1300
+BATCH_SIZE = 3600
+VAL_CHECK_INTERVAL = 1.0
 
 # Model dimensions are tuned per subset
 DIM_H_GNN = {
@@ -41,10 +42,9 @@ results_csv_path.parent.mkdir(parents=True, exist_ok=True)
 print(f"📝 Sweep results will be saved to: {results_csv_path}")
 
 # --- Start Sweeping ---
-# FOR TESTING
-for subset in ["one-band"]:#, "all", "two-band", "three-band", "topology"]:
+for subset in SUBSETS:
     for model_name in MODEL_NAMES:
-        for seed in SEEDS[:2]:
+        for seed in SEEDS:
             # Create config for the current run
             cfg = Config(
                 data_root=DATA_ROOT,
@@ -55,6 +55,7 @@ for subset in ["one-band"]:#, "all", "two-band", "three-band", "topology"]:
                 max_epochs=MAX_EPOCHS,
                 max_steps=MAX_STEPS,
                 batch_size=BATCH_SIZE,
+                val_check_interval=VAL_CHECK_INTERVAL,
                 dim_h_gnn=DIM_H_GNN[subset][model_name],
                 dim_h_mlp=DIM_H_MLP[subset],
             )

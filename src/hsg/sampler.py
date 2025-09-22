@@ -3,6 +3,11 @@ import heapq
 import torch
 from typing import Iterator, List, Sequence, Optional
 
+__all__ = [
+    "rebalance_batch",
+    "StaticBatchSampler",
+]
+
 
 def rebalance_batch(
     sample_sizes: np.ndarray, 

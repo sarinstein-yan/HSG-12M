@@ -17,19 +17,19 @@ See the [`tutorial.ipynb`](https://github.com/sarinstein-yan/HSG-12M/blob/main/t
 
 
 ## Installation
-The package requires `python>=3.11` and can be installed locally.
+The package requires `python>=3.12` and can be installed locally.
 ```bash
-$ conda create -n hsg python=3.12 # python>=3.11
+$ conda create -n hsg python=3.12 # python>=3.12
 $ conda activate hsg
 
 $ git clone https://github.com/sarinstein-yan/HSG-12M.git
 $ cd HSG-12M
-$ pip install . 
+$ pip install -e . 
 ```
-Or if you want to install with a specific CUDA version of PyTorch, you can set the `CUDA` environment variable to the desired version (e.g., `cu124` for CUDA 12.4) before running the installation command:
+Or if you want to install with a specific CUDA version of PyTorch, you can set the `CUDA` environment variable to the desired version (e.g., `cu126` for CUDA 12.6) before running the installation command:
 ```bash
-$ export CUDA=cu124 # < On Linux or macOS
-# On Windows (PowerShell): `$CUDA = "cu124"`
+$ export CUDA=cu126 # < On Linux or macOS
+# On Windows (PowerShell): `$CUDA = "cu126"`
 $ pip install . --extra-index-url https://download.pytorch.org/whl/${CUDA}
 ```
 
@@ -40,7 +40,7 @@ The download of raw data files is by [`easyDataverse`](https://github.com/gdcc/e
 
 The `NetworkX MultiGraph` dataset is processed to [`PyTorch Geometric`](https://pyg.org/) Dataset via the scheme discussed in the companion paper.
 
-Feel free to overwrite the `process` method in `HSGOnDisk` or `HSGInMemory` to customize the featurization and processing.
+Feel free to overwrite the `process()` method in `HSGOnDisk` or `HSGInMemory` to customize the featurization and processing.
 
 Available dataset variants (`subset`) are:
 - `one-band`: 24 classes, balanced
@@ -50,12 +50,13 @@ Available dataset variants (`subset`) are:
 - `all` / `all-static`: 1401 classes, balanced
 
 ```python
-from hsg import HSGOnDisk, HSGInMemory
+from hsg import HSGInMemory, HSGOnDisk
+ROOT_DIR = 'path/to/dataset_root'
 
-# # use HSGOnDisk for large dataset variants that may overflow RAM
-# ds = HSGOnDisk(root="./dev", subset="one-band")
+ds = HSGInMemory(root=ROOT_DIR, subset="one-band")
 
-ds = HSGInMemory(root="./dev", subset="one-band")
+# # use HSGOnDisk if some large dataset variant overflows RAM
+# ds = HSGOnDisk(root=ROOT_DIR, subset="one-band")
 
 print("Number of graphs:", len(ds))
 print("Number of classes:", ds.num_classes)
@@ -75,55 +76,87 @@ A graph: Data(edge_index=[2, 6], x=[4, 4], edge_attr=[6, 13], y=[1])
 
 ## Benchmarking
 
-Training is done with [`PyTorch Lightning`](https://lightning.ai/docs/pytorch/stable/). The training code is located in `src/hsg/training.py`.
+Training is done with [`PyTorch Lightning`](https://lightning.ai/docs/pytorch/stable/). 
+The training code is located in `src/hsg/training.py` and `scripts/benchmark.py`.
 
-To run the benchmarking on the GNN baseline models:
+### Reproducing Benchmarking Results
+
+**Run the following command to reproduce the benchmarking results in the companion paper.**
+
+You may need to adjust the configurations in the script file.
 
 ```bash
-$ python -m src/hsg/training.py \
-    --root path/to/dataset_root \
-    --save_dir path/to/baseline_result \
-    --subset one-band \
-    # ^ available: one-band, two-band, three-band, topology, all (all-static)
-    --models gcn sage gat gin \
-    # ^ available: gcn, sage, gat, gatv2, gin, gine; omit for all
-    --epochs 200 \
-    --batch_size 256 \
-    --dim_gnn 256 \
-    --dim_mlp 256 \
-    --layers_gnn 4 \
-    --layers_mlp 2 \
-    --heads 1 \
-    # ^ only for GAT and GATv2
-    --dropout 0.1 \
-    --lr_init 1e-2 \
-    --lr_min 1e-5 \
-    --t0 10 \
-    --t_mult 4 \
-    --seeds 42 624 706 \
-    --log_every_n_steps 5 \
-    --early_stop_patience 10
+# cd path/to/HSG-12M (if not already in it)
+$ python scripts/benchmark.py
+# OR: $ python src/hsg/training.py
 ```
 
-To run interactively, use `hsg.run_experiment(args: argparse.Namespace)` (source code in `src/hsg/training.py`) to run the experiment in IPython or Jupyter Notebook:
+### Custom Training
+
+Run experiment for one model on one dataset variant (and a certain seed if specified).
+
+Pass training configurations to `hsg.Config()`
 
 ```python
-from argparse import Namespace
-args = Namespace(
-    root='path/to/dataset_root',
-    save_dir='path/to/baseline_result',
-    subset='one-band',
-    models=['gcn', 'sage', 'gat', 'gin'],
-    ...
-)
+cfg = hsg.Config(
+    ### Environment
+    data_root=ROOT_DIR,              # Root directory for data
+    save_dir="path/to/results",       # Directory to save experiment results
+    subset="one-band",               # Dataset subset to use
+    seed=None,                       # Set random seed for reproducibility
 
-import hsg
-hsg.run_experiment(args)
+    ### Training
+    model_name="gcn",                # Model architecture (e.g., 'gcn', 'sage', 'gat')
+    batch_size=4096,                  # Batch size for training
+    max_epochs=100,                    # Maximum number of training epochs
+    max_steps=-1,                    # Maximum number of training steps (-1 for unlimited)
+
+    ### DataModule
+    size_mode="edge",                # Batch size limitation mode ("edge" or "node")
+    max_num_per_batch=2_000_000,     # Maximum number of edges/nodes per batch. Batches are rebalanced to avoid OOM
+    transform=None,                  # Dataset transform
+
+    ### Model Hyperparameters
+    dim_h_gnn=64,                    # Hidden dimension size for GNN Conv layers
+    dim_h_mlp=64,                    # Hidden dimension size for MLP layers
+    num_layers_gnn=4,                # Number of GNN Conv layers
+    num_layers_mlp=2,                # Number of MLP layers
+    dropout=0.0,                     # Dropout rate
+    num_heads=1,                     # Number of attention heads (for GAT/GATv2 only)
+    kernel_size=5,                   # Kernel size (for MoNet/SplineCNN only)
+
+    ### Optimizer
+    lr_init=1e-3,                    # Initial learning rate
+    lr_min=1e-5,                     # Minimum learning rate, for CosineAnnealing scheduler
+    weight_decay=0.0,                # Weight decay for optimizer, for AdamW
+    T_0=100,                         # Scheduler parameter, for CosineAnnealingWarmRestarts
+
+    ### Trainer
+    devices="auto",                  # Devices to use ("auto", int, or str)
+    strategy="auto",                 # Training strategy ("auto" or specific strategy)
+    val_check_interval=1.0,          # Validation check interval
+    log_every_n_steps=50,            # Logging frequency (steps)
+    deterministic=True,              # Deterministic training for reproducibility. NOTE: True will consume a lot more memory!
+    profiler=None,                   # Profiler type (None or string)
+    fast_dev_run=False,              # Fast development run (debug mode)
+    num_sanity_val_steps=0,          # Number of sanity validation steps before training 
+)
 ```
 
+And then run training with `hsg.run_experiment(cfg)`
+
+```python
+results = hsg.run_experiment(cfg)
+```
+
+`results` is a `dict` containing the test metrics and training stats.
+
+Training logs and checkpoints are saved together in `Config.save_dir`.
+
 To view Tensorboard logs:
+
 ```bash
-$ tensorboard --logdir path/to/baseline_result
+$ tensorboard --logdir path/to/results
 ```
 
 ## Raw Data Files

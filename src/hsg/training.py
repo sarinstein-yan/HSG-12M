@@ -26,6 +26,10 @@ from hsg.sampler import rebalance_batch
 from hsg.gnn_baselines import get_model_instance
 from hsg.callback import DDPMonitorCallback
 
+__all__ = [
+    "HSGLightningDataModule", "LightningGNN", "Config", "run_experiment"
+]
+
 # =================================================================================
 # 1. Lightning DataModule
 # =================================================================================
@@ -269,11 +273,12 @@ class Config:
     # Trainer
     devices: int | str = "auto"
     strategy: str = "auto"
+    val_check_interval: int | float = 1.0
     log_every_n_steps: int = 50
+    deterministic: bool = False
     profiler: str | None = None
     fast_dev_run: bool = False
     num_sanity_val_steps: int = 0
-    deterministic: bool = True
 
 # =================================================================================
 # 4. Experiment Runner Wrapper
@@ -317,8 +322,8 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
     # 3. Setup Logging & Callbacks
     save_path = Path(cfg.save_dir) / cfg.subset
     save_path.mkdir(parents=True, exist_ok=True)
-    
-    version_str = f"{cfg.model_name}-bs{cfg.batch_size}-ep{cfg.epochs}-seed{cfg.seed}-{int(time.time())}"
+
+    version_str = f"{cfg.model_name}-bs{cfg.batch_size}-ep{cfg.max_epochs}-stp{cfg.max_steps}-seed{cfg.seed}-{int(time.time())}"
     loggers = [
         TensorBoardLogger(save_path / "tb_logs", name=cfg.model_name, version=version_str),
         CSVLogger(save_path / "csv_logs", name=cfg.model_name, version=version_str)
@@ -335,13 +340,15 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
         devices=cfg.devices,
         strategy=cfg.strategy,
         callbacks=[ckpt_f1, train_stats],
+        max_epochs=cfg.max_epochs,
+        max_steps=cfg.max_steps,
+        val_check_interval=cfg.val_check_interval,
         logger=loggers,
-        max_epochs=cfg.epochs,
         log_every_n_steps=cfg.log_every_n_steps,
+        deterministic=cfg.deterministic,
         profiler=cfg.profiler,
         fast_dev_run=cfg.fast_dev_run,
         num_sanity_val_steps=cfg.num_sanity_val_steps,
-        deterministic=cfg.deterministic,
     )
 
     trainer.fit(gnn, datamodule=dm)
@@ -382,15 +389,16 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("medium")
 
     # --- Sweep Configuration ---
-    DATA_ROOT = ...
-    SAVE_DIR = ...
+    DATA_ROOT = os.getenv("HSG_DATA_ROOT", "data/hsg")
+    SAVE_DIR = os.getenv("HSG_SAVE_DIR", "results/hsg_benchmark")
 
     SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
     MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
     SEEDS = [42, 2025, 666]
     MAX_EPOCHS = 100
-    MAX_STEPS = 5000
-    BATCH_SIZE = 3500
+    MAX_STEPS = 1300
+    BATCH_SIZE = 3600
+    VAL_CHECK_INTERVAL = 1.0
 
     # Model dimensions are tuned per subset
     DIM_H_GNN = {
@@ -411,7 +419,6 @@ if __name__ == "__main__":
     print(f"📝 Sweep results will be saved to: {results_csv_path}")
 
     # --- Start Sweeping ---
-    # for subset in SUBSETS:
     for subset in SUBSETS:
         for model_name in MODEL_NAMES:
             for seed in SEEDS:
@@ -425,6 +432,7 @@ if __name__ == "__main__":
                     max_epochs=MAX_EPOCHS,
                     max_steps=MAX_STEPS,
                     batch_size=BATCH_SIZE,
+                    val_check_interval=VAL_CHECK_INTERVAL,
                     dim_h_gnn=DIM_H_GNN[subset][model_name],
                     dim_h_mlp=DIM_H_MLP[subset],
                 )

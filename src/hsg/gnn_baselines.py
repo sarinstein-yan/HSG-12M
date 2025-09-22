@@ -49,6 +49,7 @@ __all__ = [
     'SplineCNN',
     'MoNet',
     'CGCNN',
+    'MF',
     'BasicGNN',
     'GNNBaselines',
     'get_model_instance',
