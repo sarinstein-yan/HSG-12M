@@ -25,6 +25,8 @@ $ conda activate hsg
 $ git clone https://github.com/sarinstein-yan/HSG-12M.git
 $ cd HSG-12M
 $ pip install -e . 
+# Check Installation
+$ python -c "import hsg; print(hsg.__version__)"
 ```
 Or if you want to install with a specific CUDA version of PyTorch, you can set the `CUDA` environment variable to the desired version (e.g., `cu126` for CUDA 12.6) before running the installation command:
 ```bash
@@ -197,7 +199,8 @@ Each file stores spectral graph data generated from one **polynomial class**. Th
 | `b_vals`        | `np.ndarray`     | List of parameter values for `b` used. |
 | `class_meta`    | `Dict[str, Any]` | Class-level metadata, including polynomial class and Hamiltonian information. |
 
-**Note:** Except for `y` and `class_meta` which are class-level, the other three are **aligned by index**, i.e., the $i$-th graph in `graphs_pickle` was generated using `a = a_vals[i]` and `b = b_vals[i]`.
+> [!Note]
+> Except for `y` and `class_meta` which are class-level, the other three are **aligned by index**, i.e., the $i$-th graph in `graphs_pickle` was generated using `a = a_vals[i]` and `b = b_vals[i]`.
 
 
 ### Content of `class_meta`
@@ -222,8 +225,9 @@ Take the **9-th** class as an example, if the `raw/class_9.npz` file is download
 
 ```python
 import hsg
+from pathlib import Path
 
-nx_graphs, y, a_vals, b_vals, class_meta = hsg.load_class(class_idx=9, raw_dir='./dev/raw')
+nx_graphs, y, a_vals, b_vals, class_meta = hsg.load_class(class_idx=9, raw_dir=Path(ROOT_DIR) / 'raw')
 
 print("class label:", y)
 print("a_vals:", a_vals)
@@ -315,7 +319,7 @@ The dataset generator used in the companion paper is as follows:
 ```python
 import hsg
 gen = hsg.HSG_Generator(
-    root="./dev",
+    root=ROOT_DIR,
     hopping_range=[4,5,6], 
     num_bands=[1,2,3],
     real_coeff_walk=[-10, -5, -2, -1, -0.5, -0.1, 0, 0.1, 0.5, 1, 2, 5, 10],
