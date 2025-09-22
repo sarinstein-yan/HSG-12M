@@ -12,8 +12,8 @@ def is_rank_zero():
     return dist.get_rank() == 0 if dist.is_available() and dist.is_initialized() else True
 
 # --- Sweep Configuration ---
-DATA_ROOT = ...
-SAVE_DIR = ...
+DATA_ROOT = "/mnt/ssd/nhsg12m"
+SAVE_DIR = "/mnt/ssd/nhsg12m/baseline_sweep"
 
 SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
 MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
@@ -42,9 +42,10 @@ print(f"📝 Sweep results will be saved to: {results_csv_path}")
 
 # --- Start Sweeping ---
 # FOR TESTING
-for subset in ["one-band"]:#, "all", "two-band", "three-band", "topology"]:
+# for subset in ["one-band"]:#, "all", "two-band", "three-band", "topology"]:
+for subset in SUBSETS:
     for model_name in MODEL_NAMES:
-        for seed in SEEDS[:2]:
+        for seed in SEEDS:
             # Create config for the current run
             cfg = Config(
                 data_root=DATA_ROOT,
