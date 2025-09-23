@@ -558,7 +558,7 @@ class GINE(BasicGNN):
     supports_norm_batch: Final[bool]
 
     def init_conv(self, in_channels: int, out_channels: int,
-                  **kwargs) -> MessagePassing:
+                  edge_dim: int = None, **kwargs) -> MessagePassing:
         mlp = MLP(
             [in_channels, out_channels, out_channels],
             act=self.act,
@@ -566,9 +566,7 @@ class GINE(BasicGNN):
             norm=self.norm,
             norm_kwargs=self.norm_kwargs,
         )
-        return GINEConv(mlp, 
-                        edge_dim=kwargs.get('edge_dim', None),
-                        **kwargs)
+        return GINEConv(mlp, edge_dim=edge_dim, **kwargs)
 
 class GAT(BasicGNN):
     r"""The Graph Neural Network from `"Graph Attention Networks"
