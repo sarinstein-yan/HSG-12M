@@ -253,7 +253,7 @@ class Config:
     # DataModule
     size_mode: str = "edge"
     max_num_per_batch: int = 2_000_000
-    transform: Any | None = None # "cartesian" for spline/monet, else None
+    transform: Any | None = None
 
     # Model Hyperparameters
     dim_h_gnn: int = 64
@@ -262,7 +262,7 @@ class Config:
     num_layers_mlp: int = 2
     dropout: float = 0.0
     num_heads: int = 1  # For GAT/GATv2
-    kernel_size: int = 5  # For MoNet/SplineCNN
+    kernel_size: int = 6  # For MoNet/SplineCNN
 
     # Optimizer
     lr_init: float = 1e-3
@@ -275,10 +275,13 @@ class Config:
     strategy: str = "auto"
     val_check_interval: int | float = 1.0
     log_every_n_steps: int = 50
-    deterministic: bool = False
+    deterministic: bool = False # True will consume a lot of memory
     profiler: str | None = None
-    fast_dev_run: bool = False
     num_sanity_val_steps: int = 0
+    fast_dev_run: bool = False
+    limit_train_batches: int | float = 1.0
+    limit_val_batches: int | float = 1.0
+    limit_test_batches: int | float = 1.0
 
 # =================================================================================
 # 4. Experiment Runner Wrapper
@@ -291,9 +294,8 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
     pl.seed_everything(cfg.seed, workers=True)
 
     # 1. Setup DataModule
-    if cfg.model_name in ["spline", "monet"]:
-        cfg.transform = T.Cartesian(cat=False)
-    
+    # if cfg.model_name in ["spline", "monet"]:
+    #     cfg.transform = T.Cartesian(cat=False)
     dm = HSGLightningDataModule(
         root=cfg.data_root, subset=cfg.subset, transform=cfg.transform, seed=cfg.seed,
         batch_size=cfg.batch_size, size_mode=cfg.size_mode, max_num_per_batch=cfg.max_num_per_batch
@@ -347,8 +349,11 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
         log_every_n_steps=cfg.log_every_n_steps,
         deterministic=cfg.deterministic,
         profiler=cfg.profiler,
-        fast_dev_run=cfg.fast_dev_run,
         num_sanity_val_steps=cfg.num_sanity_val_steps,
+        fast_dev_run=cfg.fast_dev_run,
+        limit_train_batches=cfg.limit_train_batches,
+        limit_val_batches=cfg.limit_val_batches,
+        limit_test_batches=cfg.limit_test_batches,
     )
 
     trainer.fit(gnn, datamodule=dm)
@@ -396,17 +401,17 @@ if __name__ == "__main__":
     MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
     SEEDS = [42, 2025, 666]
     MAX_EPOCHS = 100
-    MAX_STEPS = 1300
-    BATCH_SIZE = 3600
+    MAX_STEPS = 1000
+    BATCH_SIZE = 8192
     VAL_CHECK_INTERVAL = 1.0
 
     # Model dimensions are tuned per subset
     DIM_H_GNN = {
-        "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 194])),
-        "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 402])),
-        "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
-        "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
-        "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
+        "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 172])),
+        "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 342])),
+        "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
+        "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
+        "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
     }
     DIM_H_MLP = {
         "one-band": 128, "two-band": 256, "three-band": 1500,

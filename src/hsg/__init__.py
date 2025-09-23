@@ -6,7 +6,7 @@ __all__ = [
     "CGCNN", "SplineCNN", "MoNet", "MF",
     "GNNBaselines", "get_model_instance",
     "HSGOnDisk", "HSGInMemory",
-    "StaticBatchSampler", "rebalance_batch",
+    "StaticBatchSampler", "rebalance_batch", "plot_batch_sums",
     "DDPMonitorCallback",
     "HSGLightningDataModule", "LightningGNN",
     "Config", "run_experiment",
@@ -22,7 +22,11 @@ from hsg.pyg import (
     HSGInMemory,
     HSGOnDisk,
 )
-from hsg.sampler import rebalance_batch, StaticBatchSampler
+from hsg.sampler import (
+    rebalance_batch, 
+    StaticBatchSampler,
+    plot_batch_sums,
+)
 from hsg.callback import DDPMonitorCallback
 from hsg.training import (
     HSGLightningDataModule,

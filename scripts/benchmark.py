@@ -19,17 +19,17 @@ SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
 MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
 SEEDS = [42, 2025, 666]
 MAX_EPOCHS = 100
-MAX_STEPS = 1300
-BATCH_SIZE = 3600
+MAX_STEPS = 1000
+BATCH_SIZE = 8192
 VAL_CHECK_INTERVAL = 1.0
 
 # Model dimensions are tuned per subset
 DIM_H_GNN = {
-    "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 194])),
-    "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 402])),
-    "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
-    "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
-    "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
+    "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 172])),
+    "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 342])),
+    "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
+    "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
+    "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
 }
 DIM_H_MLP = {
     "one-band": 128, "two-band": 256, "three-band": 1500,

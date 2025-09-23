@@ -812,7 +812,7 @@ class MoNet(BasicGNN):
                              "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K).")
         return GMMConv(in_channels, out_channels,
                        dim=edge_dim, 
-                       kernel_size=kwargs.get('kernel_size', 5),
+                       kernel_size=kwargs.get('kernel_size', 6),
                        separate_gaussians=kwargs.get('separate_gaussians', False),
                        aggr=kwargs.get('aggr', 'mean'))
 
