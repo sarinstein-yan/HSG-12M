@@ -36,10 +36,30 @@ DIM_H_MLP = {
     "topology": 1500, "all": 1500
 }
 
+test_run = False
+if test_run:
+    # Quick test run configuration
+    SUBSETS = ["all"]
+    MODEL_NAMES = ["mf", "gine"]
+    SEEDS = [42]
+    MAX_STEPS = 10
+    LIMIT_TRAIN_BATCHES = 2
+    LIMIT_VAL_BATCHES = 2
+    LIMIT_TEST_BATCHES = 2
+else:
+    SUBSETS = ["one-band", "all", "two-band", "three-band", "topology"]
+    SEEDS = [42, 2025, 666]
+    MAX_STEPS = 1000
+    LIMIT_TRAIN_BATCHES = 1.0
+    LIMIT_VAL_BATCHES = 1.0
+    LIMIT_TEST_BATCHES = 1.0
+
+
 # Define path for incremental results and ensure directory exists
 results_csv_path = Path(SAVE_DIR) / "sweep_results.csv"
 results_csv_path.parent.mkdir(parents=True, exist_ok=True)
 print(f"📝 Sweep results will be saved to: {results_csv_path}")
+
 
 # --- Start Sweeping ---
 for subset in SUBSETS:
@@ -58,38 +78,43 @@ for subset in SUBSETS:
                 val_check_interval=VAL_CHECK_INTERVAL,
                 dim_h_gnn=DIM_H_GNN[subset][model_name],
                 dim_h_mlp=DIM_H_MLP[subset],
+                limit_train_batches=LIMIT_TRAIN_BATCHES,
+                limit_val_batches=LIMIT_VAL_BATCHES,
+                limit_test_batches=LIMIT_TEST_BATCHES,
             )
 
-            try:
-                results = run_experiment(cfg)
-                # Add config details for easy grouping later
-                if is_rank_zero():
-                    results['subset'] = subset
-                    results['model_name'] = model_name
-                    results['seed'] = seed
+            for trial in range(NUM_TRIALS):
+                try:
+                    results = run_experiment(cfg)
+                    # Add config details for easy grouping later
+                    if is_rank_zero():
+                        results['subset'] = subset
+                        results['model_name'] = model_name
+                        results['seed'] = seed
 
-                    # --- Flush result to disk immediately ---
-                    current_result_df = pd.DataFrame([results])
-                    # Append to CSV, write header only if file doesn't exist
-                    current_result_df.to_csv(
-                        results_csv_path,
-                        mode='a',
-                        header=not results_csv_path.exists(),
-                        index=False
-                    )
+                        # --- Flush result to disk immediately ---
+                        current_result_df = pd.DataFrame([results])
+                        # Append to CSV, write header only if file doesn't exist
+                        current_result_df.to_csv(
+                            results_csv_path,
+                            mode='a',
+                            header=not results_csv_path.exists(),
+                            index=False
+                        )
 
-                    # --- Live Preview ---
-                    print(f"✅ Result saved. Preview of results file:")
-                    live_preview_df = pd.read_csv(results_csv_path)
-                    print(live_preview_df.tail())
-                    print("-" * 50)
-            
-            except Exception as e:
-                if is_rank_zero():
-                    print(f"‼️ ERROR running {model_name} on {subset} with seed {seed}: {e}")
-                    with open(Path(SAVE_DIR) / "error_log.txt", "a") as f:
-                        f.write(f"[{time.ctime()}] ERROR on {model_name}/{subset}/seed{seed}: {e}\n")
-                continue
+                        # --- Live Preview ---
+                        print(f"✅ Result saved. Preview of results file:")
+                        live_preview_df = pd.read_csv(results_csv_path)
+                        print(live_preview_df.tail())
+                        print("-" * 50)
+                    break  # Exit the retry loop on success
+                
+                except Exception as e:
+                    if is_rank_zero():
+                        print(f"‼️ ERROR trial {trial+1}/{NUM_TRIALS} for {model_name} on {subset} seed {seed}: {e}")
+                        if trial + 1 == NUM_TRIALS:
+                            with open(Path(SAVE_DIR) / "error_log.txt", "a") as f:
+                                f.write(f"[{time.ctime()}] ERROR on {model_name}/{subset}/seed{seed}: {e}\n")
 
 # --- Aggregate and Summarize Final Results ---
 if is_rank_zero():
