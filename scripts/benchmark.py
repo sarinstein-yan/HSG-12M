@@ -20,7 +20,7 @@ MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "gine", "gatv2"]
 SEEDS = [42, 2025, 666]
 MAX_EPOCHS = 100
 MAX_STEPS = 1000
-BATCH_SIZE = 7200
+BATCH_SIZE = 6000
 VAL_CHECK_INTERVAL = 1.0
 
 # Model dimensions are tuned per subset

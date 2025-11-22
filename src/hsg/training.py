@@ -142,8 +142,7 @@ class HSGLightningDataModule(pl.LightningDataModule):
                           batch_size=self.hparams.batch_size,
                           num_workers=self.hparams.num_workers,
                           pin_memory=self.hparams.pin_memory,
-                          persistent_workers=self.hparams.persistent_workers,
-                          shuffle=True)
+                          persistent_workers=self.hparams.persistent_workers)
 
 # =================================================================================
 # 2. Lightning Module
@@ -338,6 +337,7 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
     train_stats = DDPMonitorCallback()
 
     # 4. Setup Trainer & Run
+    # TODO: force validation at the end of training if in the middle of an epoch
     trainer = pl.Trainer(
         devices=cfg.devices,
         strategy=cfg.strategy,
@@ -402,7 +402,7 @@ if __name__ == "__main__":
     SEEDS = [42, 2025, 666]
     MAX_EPOCHS = 100
     MAX_STEPS = 1000
-    BATCH_SIZE = 7200
+    BATCH_SIZE = 6000
     VAL_CHECK_INTERVAL = 1.0
 
     # Model dimensions are tuned per subset

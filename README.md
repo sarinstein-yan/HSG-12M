@@ -88,7 +88,7 @@ The training code is located in `src/hsg/training.py` and `scripts/benchmark.py`
 You may need to adjust the configurations in the script file.
 
 ```bash
-# cd path/to/HSG-12M (if not already in it)
+# $ cd path/to/HSG-12M (if not already in it)
 $ python scripts/benchmark.py
 # OR: $ python src/hsg/training.py
 ```
@@ -311,6 +311,7 @@ plot_spatial_multigraph(graph, ax=ax)
 plt.tight_layout(); plt.show()
 ```
 
+<!-- TODO: Add figure & other outputs below -->
 
 ## HSG-12M Generation
 
