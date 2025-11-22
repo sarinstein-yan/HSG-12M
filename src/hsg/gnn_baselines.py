@@ -49,6 +49,7 @@ __all__ = [
     'SplineCNN',
     'MoNet',
     'CGCNN',
+    'MF',
     'BasicGNN',
     'GNNBaselines',
     'get_model_instance',
@@ -565,9 +566,7 @@ class GINE(BasicGNN):
             norm=self.norm,
             norm_kwargs=self.norm_kwargs,
         )
-        return GINEConv(mlp, 
-                        edge_dim=edge_dim,
-                        **kwargs)
+        return GINEConv(mlp, edge_dim=edge_dim, **kwargs)
 
 class GAT(BasicGNN):
     r"""The Graph Neural Network from `"Graph Attention Networks"

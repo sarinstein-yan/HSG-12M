@@ -1,4 +1,4 @@
-import time
+import time, os
 from pathlib import Path
 import torch
 import torch.distributed as dist
@@ -12,15 +12,16 @@ def is_rank_zero():
     return dist.get_rank() == 0 if dist.is_available() and dist.is_initialized() else True
 
 # --- Sweep Configuration ---
-DATA_ROOT = "/mnt/ssd/nhsg12m"
-SAVE_DIR = "/mnt/ssd/nhsg12m/baseline_sweep"
+DATA_ROOT = os.getenv("HSG_DATA_ROOT", "data/hsg")
+SAVE_DIR = os.getenv("HSG_SAVE_DIR", "results/hsg_benchmark")
 
+SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
 MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "gine", "gatv2"]
+SEEDS = [42, 2025, 666]
 MAX_EPOCHS = 100
+MAX_STEPS = 1000
 BATCH_SIZE = 6000
 VAL_CHECK_INTERVAL = 1.0
-# Additional safety against OOM errors
-NUM_TRIALS = 2
 
 # Model dimensions are tuned per subset
 DIM_H_GNN = {

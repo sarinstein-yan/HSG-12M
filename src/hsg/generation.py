@@ -15,6 +15,8 @@ from tqdm import tqdm
 from typing import Sequence, Tuple, Dict, List, Any
 
 __all__ = [
+    "load_class",
+    "get_topology_mask",
     "HSG_Generator",
 ]
 
