@@ -26,6 +26,10 @@ from hsg.sampler import rebalance_batch
 from hsg.gnn_baselines import get_model_instance
 from hsg.callback import DDPMonitorCallback
 
+__all__ = [
+    "HSGLightningDataModule", "LightningGNN", "Config", "run_experiment"
+]
+
 # =================================================================================
 # 1. Lightning DataModule
 # =================================================================================
@@ -249,7 +253,7 @@ class Config:
     # DataModule
     size_mode: str = "edge"
     max_num_per_batch: int = 2_000_000
-    transform: Any | None = None # "cartesian" for spline/monet, else None
+    transform: Any | None = None
 
     # Model Hyperparameters
     dim_h_gnn: int = 64
@@ -258,7 +262,7 @@ class Config:
     num_layers_mlp: int = 2
     dropout: float = 0.0
     num_heads: int = 1  # For GAT/GATv2
-    kernel_size: int = 5  # For MoNet/SplineCNN
+    kernel_size: int = 6  # For MoNet/SplineCNN
 
     # Optimizer
     lr_init: float = 1e-3
@@ -269,11 +273,15 @@ class Config:
     # Trainer
     devices: int | str = "auto"
     strategy: str = "auto"
+    val_check_interval: int | float = 1.0
     log_every_n_steps: int = 50
+    deterministic: bool = False # True will consume a lot of memory
     profiler: str | None = None
-    fast_dev_run: bool = False
     num_sanity_val_steps: int = 0
-    deterministic: bool = True
+    fast_dev_run: bool = False
+    limit_train_batches: int | float = 1.0
+    limit_val_batches: int | float = 1.0
+    limit_test_batches: int | float = 1.0
 
 # =================================================================================
 # 4. Experiment Runner Wrapper
@@ -286,9 +294,8 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
     pl.seed_everything(cfg.seed, workers=True)
 
     # 1. Setup DataModule
-    if cfg.model_name in ["spline", "monet"]:
-        cfg.transform = T.Cartesian(cat=False)
-    
+    # if cfg.model_name in ["spline", "monet"]:
+    #     cfg.transform = T.Cartesian(cat=False)
     dm = HSGLightningDataModule(
         root=cfg.data_root, subset=cfg.subset, transform=cfg.transform, seed=cfg.seed,
         batch_size=cfg.batch_size, size_mode=cfg.size_mode, max_num_per_batch=cfg.max_num_per_batch
@@ -317,8 +324,8 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
     # 3. Setup Logging & Callbacks
     save_path = Path(cfg.save_dir) / cfg.subset
     save_path.mkdir(parents=True, exist_ok=True)
-    
-    version_str = f"{cfg.model_name}-bs{cfg.batch_size}-ep{cfg.epochs}-seed{cfg.seed}-{int(time.time())}"
+
+    version_str = f"{cfg.model_name}-bs{cfg.batch_size}-ep{cfg.max_epochs}-stp{cfg.max_steps}-seed{cfg.seed}-{int(time.time())}"
     loggers = [
         TensorBoardLogger(save_path / "tb_logs", name=cfg.model_name, version=version_str),
         CSVLogger(save_path / "csv_logs", name=cfg.model_name, version=version_str)
@@ -335,13 +342,18 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
         devices=cfg.devices,
         strategy=cfg.strategy,
         callbacks=[ckpt_f1, train_stats],
+        max_epochs=cfg.max_epochs,
+        max_steps=cfg.max_steps,
+        val_check_interval=cfg.val_check_interval,
         logger=loggers,
-        max_epochs=cfg.epochs,
         log_every_n_steps=cfg.log_every_n_steps,
-        profiler=cfg.profiler,
-        fast_dev_run=cfg.fast_dev_run,
-        num_sanity_val_steps=cfg.num_sanity_val_steps,
         deterministic=cfg.deterministic,
+        profiler=cfg.profiler,
+        num_sanity_val_steps=cfg.num_sanity_val_steps,
+        fast_dev_run=cfg.fast_dev_run,
+        limit_train_batches=cfg.limit_train_batches,
+        limit_val_batches=cfg.limit_val_batches,
+        limit_test_batches=cfg.limit_test_batches,
     )
 
     trainer.fit(gnn, datamodule=dm)
@@ -382,23 +394,24 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("medium")
 
     # --- Sweep Configuration ---
-    DATA_ROOT = ...
-    SAVE_DIR = ...
+    DATA_ROOT = os.getenv("HSG_DATA_ROOT", "data/hsg")
+    SAVE_DIR = os.getenv("HSG_SAVE_DIR", "results/hsg_benchmark")
 
     SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
     MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
     SEEDS = [42, 2025, 666]
     MAX_EPOCHS = 100
-    MAX_STEPS = 5000
-    BATCH_SIZE = 3500
+    MAX_STEPS = 1000
+    BATCH_SIZE = 8192
+    VAL_CHECK_INTERVAL = 1.0
 
     # Model dimensions are tuned per subset
     DIM_H_GNN = {
-        "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 194])),
-        "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 402])),
-        "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
-        "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
-        "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 548])),
+        "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 172])),
+        "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 342])),
+        "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
+        "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
+        "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
     }
     DIM_H_MLP = {
         "one-band": 128, "two-band": 256, "three-band": 1500,
@@ -411,7 +424,6 @@ if __name__ == "__main__":
     print(f"📝 Sweep results will be saved to: {results_csv_path}")
 
     # --- Start Sweeping ---
-    # for subset in SUBSETS:
     for subset in SUBSETS:
         for model_name in MODEL_NAMES:
             for seed in SEEDS:
@@ -425,6 +437,7 @@ if __name__ == "__main__":
                     max_epochs=MAX_EPOCHS,
                     max_steps=MAX_STEPS,
                     batch_size=BATCH_SIZE,
+                    val_check_interval=VAL_CHECK_INTERVAL,
                     dim_h_gnn=DIM_H_GNN[subset][model_name],
                     dim_h_mlp=DIM_H_MLP[subset],
                 )

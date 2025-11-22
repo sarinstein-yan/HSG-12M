@@ -557,7 +557,7 @@ class GINE(BasicGNN):
     supports_norm_batch: Final[bool]
 
     def init_conv(self, in_channels: int, out_channels: int,
-                  **kwargs) -> MessagePassing:
+                  edge_dim: int = None, **kwargs) -> MessagePassing:
         mlp = MLP(
             [in_channels, out_channels, out_channels],
             act=self.act,
@@ -566,7 +566,7 @@ class GINE(BasicGNN):
             norm_kwargs=self.norm_kwargs,
         )
         return GINEConv(mlp, 
-                        edge_dim=kwargs.get('edge_dim', None),
+                        edge_dim=edge_dim,
                         **kwargs)
 
 class GAT(BasicGNN):
@@ -811,7 +811,7 @@ class MoNet(BasicGNN):
                              "Pass get_model_instance(..., edge_dim=data.edge_attr.size(-1), kernel_size=K).")
         return GMMConv(in_channels, out_channels,
                        dim=edge_dim, 
-                       kernel_size=kwargs.get('kernel_size', 5),
+                       kernel_size=kwargs.get('kernel_size', 6),
                        separate_gaussians=kwargs.get('separate_gaussians', False),
                        aggr=kwargs.get('aggr', 'mean'))
 
