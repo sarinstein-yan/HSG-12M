@@ -142,8 +142,7 @@ class HSGLightningDataModule(pl.LightningDataModule):
                           batch_size=self.hparams.batch_size,
                           num_workers=self.hparams.num_workers,
                           pin_memory=self.hparams.pin_memory,
-                          persistent_workers=self.hparams.persistent_workers,
-                          shuffle=True)
+                          persistent_workers=self.hparams.persistent_workers)
 
 # =================================================================================
 # 2. Lightning Module
@@ -338,6 +337,7 @@ def run_experiment(cfg: Config) -> Dict[str, float]:
     train_stats = DDPMonitorCallback()
 
     # 4. Setup Trainer & Run
+    # TODO: force validation at the end of training if in the middle of an epoch
     trainer = pl.Trainer(
         devices=cfg.devices,
         strategy=cfg.strategy,
@@ -398,20 +398,20 @@ if __name__ == "__main__":
     SAVE_DIR = os.getenv("HSG_SAVE_DIR", "results/hsg_benchmark")
 
     SUBSETS = ["one-band", "two-band", "three-band", "topology", "all"]
-    MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "monet"]
+    MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "gine", "gatv2"]
     SEEDS = [42, 2025, 666]
     MAX_EPOCHS = 100
     MAX_STEPS = 1000
-    BATCH_SIZE = 8192
+    BATCH_SIZE = 6000
     VAL_CHECK_INTERVAL = 1.0
 
     # Model dimensions are tuned per subset
     DIM_H_GNN = {
-        "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 172])),
-        "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 342])),
-        "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
-        "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
-        "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 516])),
+        "one-band":   dict(zip(MODEL_NAMES, [100, 467, 330, 452, 312, 202, 312, 330])),
+        "two-band":   dict(zip(MODEL_NAMES, [200, 933, 661, 933, 621, 410, 621, 661])),
+        "three-band": dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 852, 963])),
+        "topology":   dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 852, 963])),
+        "all":        dict(zip(MODEL_NAMES, [300, 1279, 963, 1279, 852, 601, 852, 963])),
     }
     DIM_H_MLP = {
         "one-band": 128, "two-band": 256, "three-band": 1500,

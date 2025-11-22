@@ -17,7 +17,7 @@ SAVE_DIR = "/mnt/ssd/nhsg12m/baseline_sweep"
 
 MODEL_NAMES = ["mf", "gcn", "sage", "gat", "gin", "cgcnn", "gine", "gatv2"]
 MAX_EPOCHS = 100
-BATCH_SIZE = 6000 #7200
+BATCH_SIZE = 6000
 VAL_CHECK_INTERVAL = 1.0
 # Additional safety against OOM errors
 NUM_TRIALS = 2
