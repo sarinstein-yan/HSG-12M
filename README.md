@@ -1,4 +1,4 @@
-# HSG-12M [![arXiv](https://img.shields.io/badge/arXiv-2412.00568---?logo=arXiv&labelColor=b31b1b&color=grey)](https://arxiv.org/abs/2506.08618)
+# HSG-12M [![arXiv](https://img.shields.io/badge/arXiv-2506.08618---?logo=arXiv&labelColor=b31b1b&color=grey)](https://arxiv.org/abs/2506.08618) [![ICLR 2026](https://img.shields.io/badge/ICLR-2026---?logo=ICLR&labelColor=3b5998&color=grey)](https://openreview.net/forum?id=YxuKCME576)
 
 HSG-12M Spatial Multigraph Dataset.
 
@@ -369,13 +369,13 @@ print("Number of temporal graphs:", len(thsg))
 If you find this work useful, please cite our paper:
 
 ```bibtex
-@misc{yan2025hsg12mlargescalespatialmultigraph,
-      title={HSG-12M: A Large-Scale Spatial Multigraph Dataset}, 
+@misc{yan2026hsg12mlargescalebenchmarkspatial,
+      title={HSG-12M: A Large-Scale Benchmark of Spatial Multigraphs from the Energy Spectra of Non-Hermitian Crystals}, 
       author={Xianquan Yan and Hakan Akgün and Kenji Kawaguchi and N. Duane Loh and Ching Hua Lee},
-      year={2025},
+      year={2026},
       eprint={2506.08618},
       archivePrefix={arXiv},
       primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2506.08618}, 
+      url={https://arxiv.org/abs/2506.08618},
 }
 ```
