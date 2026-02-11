@@ -38,6 +38,9 @@ def rebalance_batch(
         1D array of indices representing the new order of samples, 
         or None if rebalancing is not possible
     """
+    if not _HAVE_NUMBA:
+        return _rebalance_batch_numpy(sample_sizes, batch_size, max_num_per_batch)
+
     # --- Validation (Python side) ---
     if not isinstance(sample_sizes, np.ndarray) or sample_sizes.ndim != 1:
         raise TypeError("arr must be a 1D NumPy array")
