@@ -2,7 +2,7 @@
 
 HSG-12M Spatial Multigraph Dataset.
 
-This repository contains the code in the companion paper "HSG-12M: A Large-Scale Spatial Multigraph Dataset":
+This repository contains the code in the companion paper "HSG-12M: A Large-Scale Benchmark of Spatial Multigraphs from the Energy Spectra of Non-Hermitian Crystals":
 - downloading of the raw data files
 - preliminary featurization and processing to PyTorch Geometric Dataset (both in memory and on disk)
 - benchmarking on GNN baseline models
