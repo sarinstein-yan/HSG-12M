@@ -2,6 +2,9 @@
 
 HSG-12M Spatial Multigraph Dataset.
 
+> [!NOTE]
+> A companion repository in the ICLR 2026 paper is [`poly2graph`](https://github.com/sarinstein-yan/poly2graph) (the end-to-end, high-performance data generator)
+
 This repository contains the code in the companion paper "HSG-12M: A Large-Scale Benchmark of Spatial Multigraphs from the Energy Spectra of Non-Hermitian Crystals":
 - downloading of the raw data files
 - preliminary featurization and processing to PyTorch Geometric Dataset (both in memory and on disk)
